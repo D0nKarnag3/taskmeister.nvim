@@ -1,6 +1,11 @@
 local config = require('azure_devops.config')
 local Job = require('plenary.job')
-local fzf = require('fzf-lua')
+local pickers = require('telescope.pickers')
+local finders = require('telescope.finders')
+local conf = require('telescope.config').values
+local actions = require('telescope.actions')
+local action_state = require('telescope.actions.state')
+local previewers = require('telescope.previewers')
 
 local M = {}
 
@@ -59,19 +64,46 @@ function M.prompt_search_work_items()
                 vim.schedule(function()
                   local result = vim.fn.json_decode(table.concat(job:result(), '\n'))
                   if result and result.value then
-                    local items = {}
+                    local work_items = {}
                     for _, item in ipairs(result.value) do
-                      table.insert(items, string.format("%s\t%d:%s", item.fields["System.WorkItemType"], item.id, item.fields["System.Title"]))
+                      table.insert(work_items, {
+                        id = item.id,
+                        type = item.fields['System.WorkItemType'],
+                        title = item.fields['System.Title']
+                      })
                     end
-                    fzf.fzf_exec(items, {
-                      prompt = 'Work Item > ',
-                      actions = {
-                        ['default'] = function(selected)
-                          local work_item_id = selected[1]:match("^(%d+):")
-                          print("Selected Work Item ID: " .. work_item_id)
+
+                    pickers.new({}, {
+                      promp_title = 'Work items',
+                      finder = finders.new_table {
+                        results = work_items,
+                        entry_maker = function(entry)
+                          return {
+                            value = entry,
+                            display = string.format('[%s %d]: %s',entry.type, entry.id, entry.title),
+                            ordinal = tostring(entry.id .. entry.type .. entry.title)
+                          }
                         end
-                      }
-                    })
+                      },
+                      sorter = conf.generic_sorter({}),
+                      previewer = previewers.new_buffer_previewer({
+                        define_preview = function(self, entry, status)
+                          vim.api.nvim_buf_set_lines(self.state.bufnr, 0, -1, false, { entry.value.title })
+                        end
+                      }),
+                      attach_mapping = function(prompt_bufnr, map)
+                        actions.select_default:replace(function()
+                          local selection = action_state.get_selected_entry()
+                          actions.close(prompt_bufnr)
+                          print('Selected Work item ID: ' .. selection.value.id)
+                        end)
+                        map('i', '<C-o>', function()
+                          local selection = action_state.get_selected_entry()
+                          print('Selected Work item ID: ' .. selection.value.id)
+                        end)
+                        return true
+                      end
+                    }):find()
                   end
                 end)
               end
