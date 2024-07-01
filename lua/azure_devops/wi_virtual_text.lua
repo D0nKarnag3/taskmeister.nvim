@@ -13,7 +13,7 @@ function M.add_virtual_text(bufnr, namespace_id, line, col, text)
   })
 end
 
-function M.highlight_matches()
+function M.show_work_item_virtual_text()
   local bufnr = vim.api.nvim_get_current_buf()
   local namespace_id = vim.api.nvim_create_namespace('virtual_text_matcher')
 
