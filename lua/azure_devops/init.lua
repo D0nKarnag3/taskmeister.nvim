@@ -6,11 +6,13 @@ local conf = require('telescope.config').values
 local actions = require('telescope.actions')
 local action_state = require('telescope.actions.state')
 local previewers = require('telescope.previewers')
+local api = require('azure_devops.api')
 
 local M = {}
 
 function M.setup(opts)
   config.set(opts)
+  M.register()
 end
 
 function M.prompt_search_work_items()
@@ -136,6 +138,43 @@ function M.open_work_item_in_browser()
       vim.fn.jobstart({ 'xdg-open', url })
     end
   end
+end
+
+function M.register()
+  vim.api.nvim_create_user_command(
+    'AzureShowWorkItemVirtualText',
+    function()
+      virt.show_work_item_virtual_text()
+    end,
+    {
+      nargs = 0,  -- The command expects exactly one argument (the work item ID)
+      desc = "Fetch and display virtual text for Azure DevOps Work Items"
+    }
+  )
+
+  vim.api.nvim_create_user_command(
+    'AzureClearWorkItemVirtualText',
+    function()
+      local bufnr = vim.api.nvim_get_current_buf() -- Temp
+      local namespace_id = vim.api.nvim_create_namespace('virtual_text_matcher') -- Temp
+      virt.clear_virtual_text(bufnr, namespace_id)
+    end,
+    {
+      nargs = 0,  -- The command expects exactly one argument (the work item ID)
+      desc = "Fetch and display virtual text for Azure DevOps Work Items"
+    }
+  )
+
+  vim.api.nvim_create_user_command(
+    'AzureOpenWorkItemInBrowser',
+    function()
+        M.open_work_item_in_browser();
+    end,
+    {
+      nargs = 0,
+      desc = "Open Azure DevOps Work Item in a browser"
+    }
+  )
 end
 
 return M
