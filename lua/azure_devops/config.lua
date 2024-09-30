@@ -5,6 +5,7 @@ M.defaults = {
   organization = nil,
   project = nil,
   base_url = 'https://dev.azure.com',
+  enable_work_item_details_auto_command = false,
 }
 
 M.options = {}
