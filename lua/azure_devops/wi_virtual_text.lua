@@ -1,4 +1,5 @@
 local api = require('azure_devops.api')
+local config = require('azure_devops.config')
 
 local M = {}
 
@@ -56,7 +57,11 @@ function M.show_work_item_virtual_text()
             local id = string.sub(matched_word, 3)
             local work_item_type = work_item_map[id] and work_item_map[id].work_item_type or 'Unknown'
             local title = work_item_map[id] and work_item_map[id].title or 'Unknown'
-            M.add_virtual_text(bufnr, namespace_id, i - 1, s - 1, work_item_type .. ' ')
+            local work_item_icon = ''
+            if config.options.show_work_item_icon == true then
+              work_item_icon = get_unicode_for_work_item_type(work_item_type) .. ' '
+            end
+            M.add_virtual_text(bufnr, namespace_id, i - 1, s - 1, work_item_icon .. work_item_type .. ': ')
             M.add_virtual_text(bufnr, namespace_id, i - 1, e, ' ' .. title)
             start = e + 1
           end
@@ -64,6 +69,26 @@ function M.show_work_item_virtual_text()
       end
     end)
   end)
+end
+
+function get_unicode_for_work_item_type(work_item_type)
+  local unicode_character = ""
+
+  if work_item_type == "Bug" then
+      unicode_character = ""
+  elseif work_item_type == "Task" then
+      unicode_character = ""
+  elseif work_item_type == "User Story" then
+      unicode_character = ""
+  elseif work_item_type == "Feature" then
+      unicode_character = ""
+  elseif work_item_type == "Test Case" then
+      unicode_character = "󰙨"
+  else
+      unicode_character = ""
+  end
+
+  return unicode_character
 end
 
 function M.test()
