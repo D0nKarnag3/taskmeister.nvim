@@ -2,13 +2,13 @@
   <br />
   <img src="https://github.com/D0nKarnag3/azure_devops.nvim/assets/1623724/aadaecce-838c-49e4-b131-30b40e77f44a" alt="Logo" width="280"/>
   <br />
-  AzureDevOps.nvim
+  taskmeister.nvim
   <br />
 </h1>
 
 A Neovim plugin to interact with Azure DevOps work items directly within your editor.
 
-`azure_devops.nvim` allows you to efficiently view, manage, and update Azure DevOps work items right from Neovim. Whether you're managing bugs, features, or tasks, this plugin integrates seamlessly into your workflow.
+`taskmeister.nvim` allows you to efficiently view, manage, and update Azure DevOps work items right from Neovim. Whether you're managing bugs, features, or tasks, this plugin integrates seamlessly into your workflow.
 
 ## ✨ Features
 
@@ -32,13 +32,13 @@ Install the plugin with you package manager
 
 ```lua
 {
-  "d0nkarnge/flux.nvim",
+  "d0nkarnge/taskmeister.nvim",
   dependencies = {
     "nvim-lua/plenary.nvim",
     "nvim-telescope/telescope.nvim",
   },
   config = function()
-    require("azure_devops").setup({
+    require("taskmeister").setup({
       personal_access_token = os.getenv("AZURE_PAT"),
       organization = os.getenv("AZURE_ORG"),
       project = os.getenv("AZURE_PROJ"),
@@ -49,3 +49,8 @@ Install the plugin with you package manager
 ```
 
 ## ⚙️ Configuration
+
+## 🤖 Commands
+| Type | Action | Arguments |
+| ---- | ------ | --------- |
+| Work Item | Azure | Something |
