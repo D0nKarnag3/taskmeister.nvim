@@ -1,5 +1,5 @@
-local api = require('azure_devops.api')
-local config = require('azure_devops.config')
+local api = require('taskmeister.api')
+local config = require('taskmeister.config')
 
 local M = {}
 

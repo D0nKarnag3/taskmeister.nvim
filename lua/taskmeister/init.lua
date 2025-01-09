@@ -1,5 +1,5 @@
-local config = require('azure_devops.config')
-local virt = require('azure_devops.wi_virtual_text')
+local config = require('taskmeister.config')
+local virt = require('taskmeister.wi_virtual_text')
 local Job = require('plenary.job')
 local pickers = require('telescope.pickers')
 local finders = require('telescope.finders')
@@ -7,7 +7,7 @@ local conf = require('telescope.config').values
 local actions = require('telescope.actions')
 local action_state = require('telescope.actions.state')
 local previewers = require('telescope.previewers')
-local api = require('azure_devops.api')
+local api = require('taskmeister.api')
 
 local M = {}
 
@@ -218,6 +218,41 @@ function M.fetch_and_show_work_item_details()
   end
 end
 
+function M.edit_work_item()
+  local opts = config.options
+  local current_word = vim.fn.expand('<cword>')
+  local pattern = '^WI(%d+)$'
+
+  local wid = string.match(current_word, pattern)
+  local fields = {
+    "System.Id",
+    "System.WorkItemType",
+    "System.Title",
+    "System.State",
+    "System.AssignedTo",
+    "System.Description",
+    "Microsoft.VSTS.Scheduling.OriginalEstimate",
+    "Microsoft.VSTS.Scheduling.CompletedWork",
+    "Microsoft.VSTS.Scheduling.RemainingWork"
+  }
+
+  if wid then
+    api.get_workitem_type_and_title2({ wid }, fields, function(data)
+      if data == nil then
+        return
+      end
+      vim.schedule(function()
+        local result = vim.fn.json_decode(table.concat(data, '\n'))
+        if result and result.value then
+          local formatted_content = format_work_item_for_editing_with_virtual_text(result.value)
+          create_floating_window2(formatted_content)
+          --show_virtual_text_below_word(result.value)
+        end
+      end)
+    end)
+  end
+end
+
 function create_floating_window(content)
   -- Define dimensions for the window
   local width = math.ceil(vim.o.columns * 0.6)   -- 60% of editor width
@@ -248,24 +283,28 @@ function create_floating_window(content)
 end
 
 function create_floating_window2(content)
+  -- Validate that content is a table of strings
+  print(vim.inspect(content))
+  assert(type(content) == "table", "Expected content to be a table of strings")
+
   -- Get the current buffer and window details
   local width = vim.api.nvim_get_option("columns")
   local height = vim.api.nvim_get_option("lines")
-  
+
   -- Window dimensions
   local win_width = math.floor(width * 0.5)  -- 50% of the screen width
   local win_height = math.min(10, #content)  -- Set height based on content (max 10 lines)
-  
+
   -- Window position: Set below the current line
   local row = vim.fn.line('.') -- Current line
   local col = vim.fn.col('.')  -- Current column
-  
+
   -- Create a buffer for the floating window
   local buf = vim.api.nvim_create_buf(false, true) -- No file, ephemeral buffer
-  
+
   -- Set the buffer content to the work item details
   vim.api.nvim_buf_set_lines(buf, 0, -1, false, content)
-  
+
   -- Create a floating window with the desired dimensions and position
   local win = vim.api.nvim_open_win(buf, false, {
     relative = 'cursor',  -- Relative to the current cursor position
@@ -327,6 +366,21 @@ function M.register()
     }
   )
   vim.api.nvim_create_user_command(
+    'AzureEditWorkItem',
+    function()
+      --local work_item_id = opts.args
+      --if work_item_id ~= "" then
+        M.edit_work_item()
+      --else
+        --print("Please provide a Work Item ID")
+      --end
+    end,
+    {
+      nargs = 0,  -- The command expects exactly one argument (the work item ID)
+      desc = "Fetch and display an Azure DevOps Work Item by ID"
+    }
+  )
+  vim.api.nvim_create_user_command(
     'AzureOpenWorkItemInBrowser',
     function()
         M.open_work_item_in_browser();
@@ -349,6 +403,8 @@ function format_work_item(work_items)
   if not work_item or not work_item.fields then
     return { "Invalid work item data" }
   end
+
+  table.insert(lines, "Revision  Number: " .. tostring(work_item.rev))
 
   -- Display Work Item ID, Title, and other details
   table.insert(lines, "Work Item ID: " .. tostring(work_item.fields["System.Id"]))
@@ -445,6 +501,50 @@ function show_virtual_text_below_word(work_items)
     virt_text_pos = 'overlay',   -- Positioning like an overlay on the next line
     hl_mode = 'combine'          -- Combine virtual text highlighting with current syntax
   })
+end
+
+function format_work_item_for_editing_with_virtual_text(work_items)
+  -- Buffer lines to hold only the editable content
+  local lines = {}
+  local ns_id = vim.api.nvim_create_namespace("work_item_labels")
+
+  -- We assume we're formatting the first work item
+  local work_item = work_items[1]
+
+    -- Helper to safely get a field as a string
+  local function safe_field(field)
+    return field and tostring(field) or "" -- Convert to string or use an empty string
+  end
+
+    -- Insert only the values as editable content
+  table.insert(lines, safe_field(work_item.fields["System.Id"]))
+  table.insert(lines, safe_field(work_item.fields["System.Title"]))
+  table.insert(lines, safe_field(work_item.fields["System.State"]))
+  table.insert(lines, safe_field(work_item.fields["System.Description"]))
+
+  -- Create the buffer for editing
+  local buf = vim.api.nvim_create_buf(false, true)
+  vim.api.nvim_buf_set_lines(buf, 0, -1, false, lines)
+
+  -- Add virtual text (labels) at the start of each line
+  vim.api.nvim_buf_set_extmark(buf, ns_id, 0, 0, {
+    virt_text = { { "Work Item ID: ", "Comment" } },
+    virt_text_pos = "overlay"
+  })
+  vim.api.nvim_buf_set_extmark(buf, ns_id, 1, 0, {
+    virt_text = { { "Title: ", "Comment" } },
+    virt_text_pos = "overlay"
+  })
+  vim.api.nvim_buf_set_extmark(buf, ns_id, 2, 0, {
+    virt_text = { { "State: ", "Comment" } },
+    virt_text_pos = "overlay"
+  })
+  vim.api.nvim_buf_set_extmark(buf, ns_id, 3, 0, {
+    virt_text = { { "Description: ", "Comment" } },
+    virt_text_pos = "overlay"
+  })
+
+  return buf
 end
 
 return M
