@@ -197,7 +197,7 @@ local function render_edit_dialog(bufnr, item, comments)
   })
   vim.api.nvim_buf_set_extmark(bufnr, edit_ns, 3, 0, {
     virt_text = { { "Description:", "TaskmeisterBlue" } },
-    virt_text_pos = "eol",
+    virt_text_pos = "inline",
   })
   vim.api.nvim_buf_add_highlight(bufnr, edit_ns, "TaskmeisterBlue", comments_start - 1, 0, -1)
 
