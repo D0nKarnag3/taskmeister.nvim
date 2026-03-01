@@ -170,7 +170,6 @@ function M.open_work_item_in_browser()
   local opts = config.options
   local current_word = vim.fn.expand('<cword>')
   local pattern = '^WI(%d+)$'
-
   local wid = string.match(current_word, pattern)
 
   if wid then
@@ -184,12 +183,43 @@ function M.open_work_item_in_browser()
   end
 end
 
-function M.fetch_and_show_work_item_details()
-  local opts = config.options
-  local current_word = vim.fn.expand('<cword>')
-  local pattern = '^WI(%d+)$'
+local function resolve_work_item_id(id_arg)
+  local id = id_arg
+  if not id or id == "" then
+    local current_word = vim.fn.expand('<cword>')
+    id = current_word:match('^WI(%d+)$')
+  end
+  if not id or id == "" then
+    id = vim.fn.input("Work Item ID: ")
+  end
+  if not id or id == "" then
+    return nil
+  end
+  local numeric_id = tonumber(id)
+  if not numeric_id then
+    vim.notify("Invalid work item ID: " .. tostring(id), vim.log.levels.ERROR)
+    return nil
+  end
+  return tostring(numeric_id)
+end
 
-  local wid = string.match(current_word, pattern)
+function M.open_work_item_in_browser_by_id(id_arg)
+  local wid = resolve_work_item_id(id_arg)
+  if not wid then
+    vim.notify("Please provide a work item ID (e.g. :Taskmeister browser 123)", vim.log.levels.ERROR)
+    return
+  end
+  local opts = config.options
+  local url = string.format("%s/%s/%s/_workitems/edit/%s", opts.base_url, opts.organization, opts.project, wid)
+  if vim.fn.has('win32') == 1 or is_wsl() then
+    vim.fn.jobstart({ 'cmd.exe', '/c', 'start', '', url })
+  elseif vim.fn.has('unix') == 1 or vim.fn.has('mac') == 1 then
+    vim.fn.jobstart({ 'xdg-open', url })
+  end
+end
+
+function M.fetch_and_show_work_item_details()
+  local wid = resolve_work_item_id()
   local fields = {
     "System.Id",
     "System.WorkItemType",
@@ -216,17 +246,47 @@ function M.fetch_and_show_work_item_details()
         end
       end)
     end)
+  else
+    vim.notify("Please provide a work item ID (e.g. :Taskmeister details 123)", vim.log.levels.ERROR)
   end
 end
 
-function M.edit_work_item(id_arg)
-  local id = id_arg
-  if not id or id == "" then
-    local current_word = vim.fn.expand('<cword>')
-    id = current_word:match('^WI(%d+)$')
+function M.fetch_and_show_work_item_details_by_id(id_arg)
+  local wid = resolve_work_item_id(id_arg)
+  if not wid then
+    vim.notify("Please provide a work item ID (e.g. :Taskmeister details 123)", vim.log.levels.ERROR)
+    return
   end
+  local fields = {
+    "System.Id",
+    "System.WorkItemType",
+    "System.Title",
+    "System.State",
+    "System.AssignedTo",
+    "System.Description",
+    "Microsoft.VSTS.Scheduling.OriginalEstimate",
+    "Microsoft.VSTS.Scheduling.CompletedWork",
+    "Microsoft.VSTS.Scheduling.RemainingWork"
+  }
+
+  api.get_workitem_type_and_title2({ wid }, fields, function(data)
+    if data == nil then
+      return
+    end
+    vim.schedule(function()
+      local result = vim.fn.json_decode(table.concat(data, '\n'))
+      if result and result.value then
+        local formatted_content = format_work_item(result.value)
+        create_floating_window2(formatted_content)
+      end
+    end)
+  end)
+end
+
+function M.edit_work_item(id_arg)
+  local id = resolve_work_item_id(id_arg)
   if not id then
-    vim.notify("Please provide a work item ID (e.g. :AzureEditWorkItem 123)", vim.log.levels.ERROR)
+    vim.notify("Please provide a work item ID (e.g. :Taskmeister edit 123)", vim.log.levels.ERROR)
     return
   end
   ui.open_work_item_edit_dialog(id)
@@ -305,84 +365,89 @@ function create_floating_window2(content)
 end
 
 function M.register()
-  vim.api.nvim_create_user_command(
-    'AzureShowWorkItemVirtualText',
-    function()
-      virt.show_work_item_virtual_text()
-    end,
-    {
-      nargs = 0,  -- The command expects exactly one argument (the work item ID)
-      desc = "Fetch and display virtual text for Azure DevOps Work Items"
-    }
-  )
+  local subcommands = {
+    open = true,
+    edit = true,
+    create = true,
+    list = true,
+    comment = true,
+    browser = true,
+    details = true,
+    ["vt-show"] = true,
+    ["vt-clear"] = true,
+  }
 
-  vim.api.nvim_create_user_command(
-    'AzureClearWorkItemVirtualText',
-    function()
-      virt.clear_current_buffer_virtual_text()
-    end,
-    {
-      nargs = 0,  -- The command expects exactly one argument (the work item ID)
-      desc = "Fetch and display virtual text for Azure DevOps Work Items"
-    }
-  )
-
-  vim.api.nvim_create_user_command(
-    'AzureGetWorkItem',
-    function()
-      --local work_item_id = opts.args
-      --if work_item_id ~= "" then
-        M.fetch_and_show_work_item_details()
-      --else
-        --print("Please provide a Work Item ID")
-      --end
-    end,
-    {
-      nargs = 0,  -- The command expects exactly one argument (the work item ID)
-      desc = "Fetch and display an Azure DevOps Work Item by ID"
-    }
-  )
-  vim.api.nvim_create_user_command(
-    'AzureEditWorkItem',
-    function(opts)
-        M.edit_work_item(opts.args)
-    end,
-    {
-      nargs = "?",  -- Supports either explicit ID or WI under cursor
-      desc = "Open Azure DevOps Work Item edit dialog by ID"
-    }
-  )
-  vim.api.nvim_create_user_command(
-    'AzureOpenWorkItemInBrowser',
-    function()
-        M.open_work_item_in_browser();
-    end,
-    {
-      nargs = 0,
-      desc = "Open Azure DevOps Work Item in a browser"
-    }
-  )
-  -- Commands
-  vim.api.nvim_create_user_command("TMWorkitem", function(args)
+  vim.api.nvim_create_user_command("Taskmeister", function(args)
     local subcmd = args.fargs[1]
+    if not subcmd or subcmd == "" then
+      vim.notify("Usage: :Taskmeister <open|edit|create|list|comment|browser|details|vt-show|vt-clear>", vim.log.levels.ERROR)
+      return
+    end
+
     if subcmd == "open" then
-      require("taskmeister.ui").open_work_item(args.fargs[2])
+      local id = resolve_work_item_id(args.fargs[2])
+      if not id then
+        vim.notify("Please provide a work item ID (e.g. :Taskmeister open 123)", vim.log.levels.ERROR)
+        return
+      end
+      require("taskmeister.ui").open_work_item(id)
     elseif subcmd == "edit" then
-      require("taskmeister.ui").open_work_item_edit_dialog(args.fargs[2])
+      M.edit_work_item(args.fargs[2])
     elseif subcmd == "create" then
-      require("taskmeister.ui").create_work_item(args.fargs[2])
+      local item_type = table.concat(args.fargs, " ", 2)
+      if not item_type or item_type == "" then
+        vim.notify("Please provide a work item type (e.g. :Taskmeister create Task)", vim.log.levels.ERROR)
+        return
+      end
+      require("taskmeister.ui").create_work_item(item_type)
     elseif subcmd == "list" then
-      require("taskmeister.telescope").work_items({ search = table.concat(args.fargs, " ", 2) })
+      local search = table.concat(args.fargs, " ", 2)
+      if search == "" then
+        require("taskmeister.telescope").work_items({})
+      else
+        require("taskmeister.telescope").work_items({ search = search })
+      end
     elseif subcmd == "comment" then
-      local id = args.fargs[2] or vim.fn.input("Work Item ID: ")
+      local id = resolve_work_item_id(args.fargs[2])
+      if not id then
+        vim.notify("Please provide a work item ID (e.g. :Taskmeister comment 123)", vim.log.levels.ERROR)
+        return
+      end
       local comment = vim.fn.input("Comment: ")
-      if id and comment ~= "" then
+      if comment and comment ~= "" then
         local patches = { { op = "add", path = "/fields/System.History", value = comment } }
         require("taskmeister.api").update_work_item(tonumber(id), patches)
         vim.notify("Added comment to WI" .. id)
       end
+    elseif subcmd == "browser" then
+      M.open_work_item_in_browser_by_id(args.fargs[2])
+    elseif subcmd == "details" then
+      M.fetch_and_show_work_item_details_by_id(args.fargs[2])
+    elseif subcmd == "vt-show" then
+      virt.show_work_item_virtual_text()
+    elseif subcmd == "vt-clear" then
+      virt.clear_current_buffer_virtual_text()
+    else
+      vim.notify("Unknown Taskmeister subcommand: " .. subcmd, vim.log.levels.ERROR)
     end
-  end, { nargs = "+" })
+  end, {
+    nargs = "+",
+    desc = "Taskmeister command dispatcher",
+    complete = function(arg_lead, cmd_line, _)
+      local parts = vim.split(cmd_line, "%s+")
+      if #parts <= 2 then
+        local items = {}
+        for name, _ in pairs(subcommands) do
+          if vim.startswith(name, arg_lead) then
+            table.insert(items, name)
+          end
+        end
+        table.sort(items)
+        return items
+      end
+      return {}
+    end,
+  })
 
     vim.api.nvim_create_autocmd("FileType", {
     pattern = "taskmeister",

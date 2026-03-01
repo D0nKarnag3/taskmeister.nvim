@@ -51,6 +51,25 @@ Install the plugin with you package manager
 ## ⚙️ Configuration
 
 ## 🤖 Commands
-| Type | Action | Arguments |
-| ---- | ------ | --------- |
-| Work Item | Azure | Something |
+
+All commands are routed through a single entrypoint:
+
+```vim
+:Taskmeister <subcommand> [args...]
+```
+
+| Subcommand | Arguments | Description |
+| ---------- | --------- | ----------- |
+| `open` | `[id]` | Open a work item buffer |
+| `edit` | `[id]` | Open the interactive edit dialog |
+| `create` | `<type>` | Create a new work item (`Task`, `Bug`, `Feature`, `User Story`) |
+| `list` | `[search terms...]` | Open Telescope list, optionally filtered by title text |
+| `comment` | `[id]` | Add a comment to a work item |
+| `browser` | `[id]` | Open a work item in your browser |
+| `details` | `[id]` | Show details in a floating window |
+| `vt-show` | none | Show virtual text annotations in current buffer |
+| `vt-clear` | none | Clear virtual text annotations in current buffer |
+
+For ID-based commands (`open`, `edit`, `comment`, `browser`, `details`), if no ID is passed the plugin:
+1. Tries `WI123` under cursor
+2. Prompts for an ID

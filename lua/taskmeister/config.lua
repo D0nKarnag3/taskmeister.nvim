@@ -32,10 +32,10 @@ M.defaults = {
     },
   },
   keymaps = {
-    { mode = "n", lhs = "<leader>ad", rhs = ':AzureGetWorkItem<CR>', opts = { noremap = true, silent = true, desc = "Azure DevOps show detailed informail of work item" } },
-    { mode = "n", lhs = "<leader>av", rhs = ':AzureShowWorkItemVirtualText<CR>', opts = { noremap = true, silent = true, desc = "Azure DevOps Add work item details" } },
-    { mode = "n", lhs = "<leader>ac", rhs = ':AzureClearWorkItemVirtualText<CR>', opts = { noremap = true, silent = true, desc = "Azure DevOps Open work item in browser" } },
-    { mode = "n", lhs = "<leader>ao", rhs = ':AzureOpenWorkItemInBrowser<CR>', opts = { noremap = true, silent = true, desc = "Azure DevOps Open work item in browser" } }
+    { mode = "n", lhs = "<leader>ad", rhs = ':Taskmeister details<CR>', opts = { noremap = true, silent = true, desc = "Taskmeister show work item details" } },
+    { mode = "n", lhs = "<leader>av", rhs = ':Taskmeister vt-show<CR>', opts = { noremap = true, silent = true, desc = "Taskmeister add work item virtual text" } },
+    { mode = "n", lhs = "<leader>ac", rhs = ':Taskmeister vt-clear<CR>', opts = { noremap = true, silent = true, desc = "Taskmeister clear work item virtual text" } },
+    { mode = "n", lhs = "<leader>ao", rhs = ':Taskmeister browser<CR>', opts = { noremap = true, silent = true, desc = "Taskmeister open work item in browser" } }
   }
 }
 

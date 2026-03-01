@@ -40,7 +40,7 @@ function M.work_items(opts)
 
   pickers
     .new(opts, {
-      prompt_title = "Azure Work Items" .. (opts.search and " (Search: " .. opts.search .. ")" or ""),
+      prompt_title = "Taskmeister Work Items" .. (opts.search and " (Search: " .. opts.search .. ")" or ""),
       finder = finders.new_table({
         results = work_items,
         entry_maker = function(entry)
