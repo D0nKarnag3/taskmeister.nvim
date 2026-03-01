@@ -8,6 +8,7 @@ local actions = require('telescope.actions')
 local action_state = require('telescope.actions.state')
 local previewers = require('telescope.previewers')
 local api = require('taskmeister.api')
+local ui = require('taskmeister.ui')
 
 local M = {}
 
@@ -218,39 +219,17 @@ function M.fetch_and_show_work_item_details()
   end
 end
 
-function M.edit_work_item()
-  local opts = config.options
-  local current_word = vim.fn.expand('<cword>')
-  local pattern = '^WI(%d+)$'
-
-  local wid = string.match(current_word, pattern)
-  local fields = {
-    "System.Id",
-    "System.WorkItemType",
-    "System.Title",
-    "System.State",
-    "System.AssignedTo",
-    "System.Description",
-    "Microsoft.VSTS.Scheduling.OriginalEstimate",
-    "Microsoft.VSTS.Scheduling.CompletedWork",
-    "Microsoft.VSTS.Scheduling.RemainingWork"
-  }
-
-  if wid then
-    api.get_workitem_type_and_title2({ wid }, fields, function(data)
-      if data == nil then
-        return
-      end
-      vim.schedule(function()
-        local result = vim.fn.json_decode(table.concat(data, '\n'))
-        if result and result.value then
-          local formatted_content = format_work_item_for_editing_with_virtual_text(result.value)
-          create_floating_window2(formatted_content)
-          --show_virtual_text_below_word(result.value)
-        end
-      end)
-    end)
+function M.edit_work_item(id_arg)
+  local id = id_arg
+  if not id or id == "" then
+    local current_word = vim.fn.expand('<cword>')
+    id = current_word:match('^WI(%d+)$')
   end
+  if not id then
+    vim.notify("Please provide a work item ID (e.g. :AzureEditWorkItem 123)", vim.log.levels.ERROR)
+    return
+  end
+  ui.open_work_item_edit_dialog(id)
 end
 
 function create_floating_window(content)
@@ -340,9 +319,7 @@ function M.register()
   vim.api.nvim_create_user_command(
     'AzureClearWorkItemVirtualText',
     function()
-      local bufnr = vim.api.nvim_get_current_buf() -- Temp
-      local namespace_id = vim.api.nvim_create_namespace('virtual_text_matcher') -- Temp
-      virt.clear_virtual_text(bufnr, namespace_id)
+      virt.clear_current_buffer_virtual_text()
     end,
     {
       nargs = 0,  -- The command expects exactly one argument (the work item ID)
@@ -367,17 +344,12 @@ function M.register()
   )
   vim.api.nvim_create_user_command(
     'AzureEditWorkItem',
-    function()
-      --local work_item_id = opts.args
-      --if work_item_id ~= "" then
-        M.edit_work_item()
-      --else
-        --print("Please provide a Work Item ID")
-      --end
+    function(opts)
+        M.edit_work_item(opts.args)
     end,
     {
-      nargs = 0,  -- The command expects exactly one argument (the work item ID)
-      desc = "Fetch and display an Azure DevOps Work Item by ID"
+      nargs = "?",  -- Supports either explicit ID or WI under cursor
+      desc = "Open Azure DevOps Work Item edit dialog by ID"
     }
   )
   vim.api.nvim_create_user_command(
@@ -390,6 +362,111 @@ function M.register()
       desc = "Open Azure DevOps Work Item in a browser"
     }
   )
+  -- Commands
+  vim.api.nvim_create_user_command("TMWorkitem", function(args)
+    local subcmd = args.fargs[1]
+    if subcmd == "open" then
+      require("taskmeister.ui").open_work_item(args.fargs[2])
+    elseif subcmd == "edit" then
+      require("taskmeister.ui").open_work_item_edit_dialog(args.fargs[2])
+    elseif subcmd == "create" then
+      require("taskmeister.ui").create_work_item(args.fargs[2])
+    elseif subcmd == "list" then
+      require("taskmeister.telescope").work_items({ search = table.concat(args.fargs, " ", 2) })
+    elseif subcmd == "comment" then
+      local id = args.fargs[2] or vim.fn.input("Work Item ID: ")
+      local comment = vim.fn.input("Comment: ")
+      if id and comment ~= "" then
+        local patches = { { op = "add", path = "/fields/System.History", value = comment } }
+        require("taskmeister.api").update_work_item(tonumber(id), patches)
+        vim.notify("Added comment to WI" .. id)
+      end
+    end
+  end, { nargs = "+" })
+
+    vim.api.nvim_create_autocmd("FileType", {
+    pattern = "taskmeister",
+    callback = function(args)
+      local bufnr = args.buf
+      vim.api.nvim_buf_set_keymap(bufnr, "n", "<leader>wc", "", {
+        callback = function()
+          local id = vim.b.taskmeister_work_item_id
+          if id then
+            local comment = vim.fn.input("Comment: ")
+            if comment ~= "" then
+              local patches = { { op = "add", path = "/fields/System.History", value = comment } }
+              require("taskmeister.api").update_work_item(tonumber(id), patches)
+              vim.notify("Added comment to WI" .. id)
+              require("taskmeister.ui").open_work_item(tostring(id))
+            end
+          end
+        end,
+        desc = "Add comment",
+      })
+      vim.api.nvim_buf_set_keymap(bufnr, "n", "<leader>ws", "", {
+        callback = function()
+          local id = vim.b.taskmeister_work_item_id
+          if id then
+            local state = vim.fn.input("New State (e.g., Active, Resolved): ")
+            if state ~= "" then
+              local patches = { { op = "replace", path = "/fields/System.State", value = state } }
+              require("taskmeister.api").update_work_item(tonumber(id), patches)
+              vim.notify("Updated state for WI" .. id)
+              require("taskmeister.ui").open_work_item(tostring(id))
+            end
+          end
+        end,
+        desc = "Change state",
+      })
+      vim.api.nvim_buf_set_keymap(bufnr, "n", "<leader>wa", "", {
+        callback = function()
+          local id = vim.b.taskmeister_work_item_id
+          if id then
+            local user = vim.fn.input("Assign to (email): ")
+            if user ~= "" then
+              local patches = { { op = "replace", path = "/fields/System.AssignedTo", value = user } }
+              require("taskmeister.api").update_work_item(tonumber(id), patches)
+              vim.notify("Assigned WI" .. id .. " to " .. user)
+              require("taskmeister.ui").open_work_item(tostring(id))
+            end
+          end
+        end,
+        desc = "Assign user",
+      })
+      vim.api.nvim_buf_set_keymap(bufnr, "n", "<leader>rr", "", {
+        callback = function()
+          local id = vim.b.taskmeister_work_item_id
+          if id then
+            local reaction_type = vim.fn.input("Reaction type (thumbs_up, heart, etc.): ")
+            local comment_id = vim.fn.input("Comment ID (from timeline revision): ")
+            if reaction_type ~= "" and comment_id ~= "" then
+              local success = require("taskmeister.api").add_comment_reaction(tonumber(id), tonumber(comment_id), reaction_type)
+              if success then
+                vim.notify("Added reaction " .. reaction_type .. " to comment " .. comment_id .. " in WI" .. id)
+                require("taskmeister.ui").open_work_item(tostring(id))
+              end
+            end
+          end
+        end,
+        desc = "Add reaction to comment",
+      })
+      vim.api.nvim_buf_set_keymap(bufnr, "n", ":w<CR>", "", {
+        callback = function()
+          require("taskmeister.ui").sync_buffer(bufnr)
+        end,
+        desc = "Sync work item",
+      })
+    end,
+  })
+  local config_module = require("taskmeister.config")
+  local config = config_module.options or {}
+  vim.api.nvim_set_hl(0, "TaskmeisterGreen", { fg = "#00CC6A" })
+  vim.api.nvim_set_hl(0, "TaskmeisterPurple", { fg = "#C586C0" })
+  vim.api.nvim_set_hl(0, "TaskmeisterBlue", { fg = "#0078D4" })
+  vim.api.nvim_set_hl(0, "TaskmeisterComment", { fg = "#D7BA7D" }) -- New highlight for comments
+  if not config.ui or not config.ui.use_signcolumn then
+    vim.api.nvim_set_hl(0, "TaskmeisterSignColumn", { link = "Normal" })
+  end
 end
 
 -- Function to format a single work item

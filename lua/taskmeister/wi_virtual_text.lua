@@ -2,6 +2,7 @@ local api = require('taskmeister.api')
 local config = require('taskmeister.config')
 
 local M = {}
+local namespace_id = vim.api.nvim_create_namespace('virtual_text_matcher')
 
 function M.clear_virtual_text(bufnr, namespace_id)
   vim.api.nvim_buf_clear_namespace(bufnr, namespace_id, 0, -1)
@@ -16,59 +17,59 @@ end
 
 function M.show_work_item_virtual_text()
   local bufnr = vim.api.nvim_get_current_buf()
-  local namespace_id = vim.api.nvim_create_namespace('virtual_text_matcher')
-
   M.clear_virtual_text(bufnr, namespace_id)
 
   local lines = vim.api.nvim_buf_get_lines(bufnr, 0, -1, false)
 
-  local pattern = 'WI%d+'
+  local pattern = 'WI(%d+)'
 
   local ids = {}
+  local seen = {}
   for _, line in ipairs(lines) do
-    for matched_word in line:gmatch(pattern) do
-      local id = string.sub(matched_word, 3)
-      table.insert(ids, id)
+    for id in line:gmatch(pattern) do
+      if not seen[id] then
+        seen[id] = true
+        table.insert(ids, tonumber(id))
+      end
     end
   end
 
-  api.get_workitem_type_and_title(ids, function(data)
-    if data == nil then
-      return
-    end
-    vim.schedule(function()
-      local result = vim.fn.json_decode(table.concat(data, '\n'))
-      if result and result.value then
-        local work_item_map = {}
-        for _, item in ipairs(result.value) do
-          local id = tostring(item.id)
-          work_item_map[id] = {
-            work_item_type = item.fields['System.WorkItemType'],
-            title = item.fields['System.Title']
-          }
-        end
+  if #ids == 0 then
+    return
+  end
 
-        for i, line in ipairs(lines) do
-          local start = 1
-          while true do
-            local s, e = string.find(line, pattern, start)
-            if not s then break end
-            local matched_word = string.sub(line, s, e)
-            local id = string.sub(matched_word, 3)
-            local work_item_type = work_item_map[id] and work_item_map[id].work_item_type or 'Unknown'
-            local title = work_item_map[id] and work_item_map[id].title or 'Unknown'
-            local work_item_icon = ''
-            if config.options.show_work_item_icon == true then
-              work_item_icon = get_unicode_for_work_item_type(work_item_type) .. ' '
-            end
-            M.add_virtual_text(bufnr, namespace_id, i - 1, s - 1, work_item_icon .. work_item_type .. ': ')
-            M.add_virtual_text(bufnr, namespace_id, i - 1, e, ' ' .. title)
-            start = e + 1
-          end
-        end
+  local items = api.get_work_items_batch(ids)
+  local work_item_map = {}
+  for _, item in ipairs(items or {}) do
+    local id = tostring(item.id)
+    work_item_map[id] = {
+      work_item_type = item.fields['System.WorkItemType'],
+      title = item.fields['System.Title']
+    }
+  end
+
+  for i, line in ipairs(lines) do
+    local start = 1
+    while true do
+      local s, e, id = line:find('WI(%d+)', start)
+      if not s then
+        break
       end
-    end)
-  end)
+      local work_item_type = work_item_map[id] and work_item_map[id].work_item_type or 'Unknown'
+      local title = work_item_map[id] and work_item_map[id].title or 'Unknown'
+      local work_item_icon = ''
+      if config.options.show_work_item_icon == true then
+        work_item_icon = get_unicode_for_work_item_type(work_item_type) .. ' '
+      end
+      M.add_virtual_text(bufnr, namespace_id, i - 1, s - 1, work_item_icon .. work_item_type .. ': ')
+      M.add_virtual_text(bufnr, namespace_id, i - 1, e, ' ' .. title)
+      start = e + 1
+    end
+  end
+end
+
+function M.clear_current_buffer_virtual_text()
+  M.clear_virtual_text(vim.api.nvim_get_current_buf(), namespace_id)
 end
 
 function get_unicode_for_work_item_type(work_item_type)
@@ -115,6 +116,14 @@ function M.test()
     --virt_text_win_col = col_end
     --virt_text_pos = 'overlay'
   })
+end
+
+function M.jump_to_work_item()
+  local line = vim.api.nvim_get_current_line()
+  local id = line:match("WI(%d+)")
+  if id then
+    require("taskmeister.ui").open_work_item(id)
+  end
 end
 
 return M
