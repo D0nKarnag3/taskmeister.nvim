@@ -32,10 +32,10 @@ M.defaults = {
     },
   },
   keymaps = {
-    { mode = "n", lhs = "<leader>ad", rhs = ':Taskmeister details<CR>', opts = { noremap = true, silent = true, desc = "Taskmeister show work item details" } },
-    { mode = "n", lhs = "<leader>av", rhs = ':Taskmeister vt-show<CR>', opts = { noremap = true, silent = true, desc = "Taskmeister add work item virtual text" } },
-    { mode = "n", lhs = "<leader>ac", rhs = ':Taskmeister vt-clear<CR>', opts = { noremap = true, silent = true, desc = "Taskmeister clear work item virtual text" } },
-    { mode = "n", lhs = "<leader>ao", rhs = ':Taskmeister browser<CR>', opts = { noremap = true, silent = true, desc = "Taskmeister open work item in browser" } }
+    { mode = "n", lhs = "<leader>tmd", rhs = ':Taskmeister details<CR>', opts = { noremap = true, silent = true, desc = "Taskmeister show work item details" } },
+    { mode = "n", lhs = "<leader>tmv", rhs = ':Taskmeister vt-show<CR>', opts = { noremap = true, silent = true, desc = "Taskmeister add work item virtual text" } },
+    { mode = "n", lhs = "<leader>tmc", rhs = ':Taskmeister vt-clear<CR>', opts = { noremap = true, silent = true, desc = "Taskmeister clear work item virtual text" } },
+    { mode = "n", lhs = "<leader>tmb", rhs = ':Taskmeister browser<CR>', opts = { noremap = true, silent = true, desc = "Taskmeister open work item in browser" } }
   }
 }
 
