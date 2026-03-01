@@ -327,6 +327,7 @@ function create_floating_window2(content)
   assert(type(content) == "table", "Expected content to be a table of strings")
 
   -- Get the current buffer and window details
+  local source_buf = vim.api.nvim_get_current_buf()
   local width = vim.api.nvim_get_option("columns")
   local height = vim.api.nvim_get_option("lines")
 
@@ -357,9 +358,12 @@ function create_floating_window2(content)
 
   -- Optional: Set the window to close automatically when the cursor moves
   vim.api.nvim_create_autocmd("CursorMoved", {
-    buffer = 0,
+    buffer = source_buf,
+    once = true,
     callback = function()
-      vim.api.nvim_win_close(win, true)  -- Close the floating window
+      if vim.api.nvim_win_is_valid(win) then
+        vim.api.nvim_win_close(win, true)  -- Close the floating window
+      end
     end
   })
 end
