@@ -6,6 +6,7 @@ local M = {}
 
 local buffers = {}  -- Track open work items by ID
 local edit_ns = vim.api.nvim_create_namespace("taskmeister_edit")
+local status_ns = vim.api.nvim_create_namespace("taskmeister_edit_status")
 local COMMENTS_MARKER = "──────────────── Comments ────────────────"
 local REACTION_TYPES = {
   "like",
@@ -66,21 +67,104 @@ local function extract_editor_values(bufnr)
   }
 end
 
-local function get_comments_with_reactions(work_item_id)
-  local comments = {}
-  local fetched_comments = api.get_work_item_comments(work_item_id)
-  for _, comment in ipairs(fetched_comments or {}) do
-    if comment.id and comment.text and comment.text ~= "" then
-      table.insert(comments, {
-        id = comment.id,
-        user = comment.created_by or "System",
-        timestamp = comment.created_date or "",
-        value = comment.text,
-        reactions = comment.reactions or {},
-      })
-    end
+local function current_save_status(bufnr, rev)
+  local status = vim.b[bufnr].taskmeister_save_status or "idle"
+  if status == "dirty" then
+    return "Unsaved changes", "WarningMsg"
   end
-  return comments
+  if status == "clean" or status == "idle" then
+    return "No changes", "Comment"
+  end
+  if status == "saving" then
+    return "Saving changes...", "TaskmeisterBlue"
+  end
+  if status == "saved" then
+    return string.format("Saved (rev %s)", tostring(rev)), "TaskmeisterBlue"
+  end
+  if status == "saved_dirty" then
+    return string.format("Saved (rev %s); unsaved edits remain", tostring(rev)), "WarningMsg"
+  end
+  if status == "error" then
+    return "Save failed", "ErrorMsg"
+  end
+  return "", "Normal"
+end
+
+local function build_patches_from_editor(meta, values)
+  local fields = meta.original.fields or {}
+  local old_assigned = ""
+  local current_assigned = fields["System.AssignedTo"]
+  if type(current_assigned) == "table" then
+    old_assigned = current_assigned.uniqueName or current_assigned.displayName or ""
+  elseif type(current_assigned) == "string" then
+    old_assigned = current_assigned
+  end
+
+  local patches = {}
+  if values.title ~= (fields["System.Title"] or "") then
+    table.insert(patches, { op = "replace", path = "/fields/System.Title", value = values.title })
+  end
+  if values.state ~= (fields["System.State"] or "New") then
+    table.insert(patches, { op = "replace", path = "/fields/System.State", value = values.state })
+  end
+  if values.assigned_to ~= old_assigned then
+    table.insert(patches, { op = "replace", path = "/fields/System.AssignedTo", value = values.assigned_to })
+  end
+  if values.description ~= (fields["System.Description"] or "") then
+    table.insert(patches, { op = "replace", path = "/fields/System.Description", value = values.description })
+  end
+  return patches
+end
+
+local function editor_values_equal(left, right)
+  return left.title == right.title
+    and left.state == right.state
+    and left.assigned_to == right.assigned_to
+    and left.description == right.description
+end
+
+local function get_cached_comments(bufnr)
+  return vim.b[bufnr].taskmeister_edit_comments or {}
+end
+
+local function render_edit_status(bufnr, item)
+  local save_status_text, save_status_hl = current_save_status(bufnr, item.rev)
+  vim.api.nvim_buf_clear_namespace(bufnr, status_ns, 0, -1)
+  vim.api.nvim_buf_set_extmark(bufnr, status_ns, 0, 0, {
+    virt_lines = {
+      { { string.format("Work Item #%s • rev %s", tostring(item.id), tostring(item.rev)), "TaskmeisterBlue" } },
+      { { save_status_text, save_status_hl } },
+      { { "Save: :w / <C-s>   Add comment: <leader>wc   React: <leader>wr   Close: q", "Comment" } },
+      { { "", "Normal" } },
+    },
+    virt_lines_above = true,
+  })
+end
+
+local function refresh_edit_save_status(bufnr)
+  if not vim.api.nvim_buf_is_valid(bufnr) or vim.b[bufnr].taskmeister_rendering_edit_dialog then
+    return
+  end
+  local meta = vim.b[bufnr].taskmeister_edit_meta
+  if not meta or not meta.original then
+    return
+  end
+  if vim.b[bufnr].taskmeister_save_in_progress then
+    vim.b[bufnr].taskmeister_save_status = "saving"
+    render_edit_status(bufnr, meta.original)
+    return
+  end
+
+  local values = extract_editor_values(bufnr)
+  local patches = build_patches_from_editor(meta, values)
+  if vim.tbl_isempty(patches) then
+    if vim.b[bufnr].taskmeister_save_status ~= "saved" then
+      vim.b[bufnr].taskmeister_save_status = "clean"
+    end
+  else
+    vim.b[bufnr].taskmeister_save_status = "dirty"
+  end
+  render_edit_status(bufnr, meta.original)
 end
 
 local function get_comments_with_reactions_async(work_item_id, callback)
@@ -133,6 +217,9 @@ local function reaction_bubbles(reactions)
 end
 
 local function render_edit_dialog(bufnr, item, comments)
+  comments = comments or {}
+  vim.b[bufnr].taskmeister_edit_comments = comments
+  vim.b[bufnr].taskmeister_rendering_edit_dialog = true
   local fields = item.fields or {}
   local title = fields["System.Title"] or ""
   local state = fields["System.State"] or "New"
@@ -155,7 +242,7 @@ local function render_edit_dialog(bufnr, item, comments)
   table.insert(lines, COMMENTS_MARKER)
   local comments_start = #lines + 1
   local comment_rows = {}
-  if comments and #comments > 0 then
+  if #comments > 0 then
     for _, comment in ipairs(comments) do
       table.insert(lines, string.format("[#%d] %s  %s", comment.id, comment.user, comment.timestamp))
       table.insert(comment_rows, {
@@ -175,14 +262,7 @@ local function render_edit_dialog(bufnr, item, comments)
   vim.api.nvim_buf_set_option(bufnr, "modifiable", true)
   vim.api.nvim_buf_set_lines(bufnr, 0, -1, false, lines)
   vim.api.nvim_buf_clear_namespace(bufnr, edit_ns, 0, -1)
-  vim.api.nvim_buf_set_extmark(bufnr, edit_ns, 0, 0, {
-    virt_lines = {
-      { { string.format("Work Item #%s • rev %s", tostring(item.id), tostring(item.rev)), "TaskmeisterBlue" } },
-      { { "Save: :w / <C-s>   Add comment: <leader>wc   React: <leader>wr   Close: q", "Comment" } },
-      { { "", "Normal" } },
-    },
-    virt_lines_above = true,
-  })
+  render_edit_status(bufnr, item)
   vim.api.nvim_buf_set_extmark(bufnr, edit_ns, 0, 0, {
     virt_text = { { "Title: ", "TaskmeisterBlue" } },
     virt_text_pos = "inline",
@@ -220,6 +300,7 @@ local function render_edit_dialog(bufnr, item, comments)
   end
 
   vim.api.nvim_buf_set_option(bufnr, "modified", false)
+  vim.b[bufnr].taskmeister_rendering_edit_dialog = false
 end
 
 function M.open_work_item(id)
@@ -249,53 +330,56 @@ function M.open_work_item(id)
 end
 
 function M.save_work_item_dialog(bufnr)
+  M.save_work_item_dialog_async(bufnr, nil)
+end
+
+local function notify_save_failure(meta, err)
+  if err and err.is_conflict then
+    vim.notify(
+      "Work item #" .. meta.id .. " was updated remotely since revision " .. tostring(meta.rev) .. ". Reload and retry.",
+      vim.log.levels.WARN
+    )
+    return
+  end
+  vim.notify("Failed to save work item #" .. meta.id .. ": " .. (err and err.message or "unknown error"), vim.log.levels.ERROR)
+end
+
+function M.save_work_item_dialog_sync(bufnr)
   local meta = vim.b[bufnr].taskmeister_edit_meta
   if not meta or not meta.id then
     vim.notify("No edit metadata found for this buffer", vim.log.levels.ERROR)
-    return
+    return false
+  end
+
+  if vim.b[bufnr].taskmeister_save_in_progress then
+    vim.notify("Save already in progress", vim.log.levels.INFO)
+    return false
   end
 
   local values = extract_editor_values(bufnr)
-  local fields = meta.original.fields or {}
-  local old_assigned = ""
-  local current_assigned = fields["System.AssignedTo"]
-  if type(current_assigned) == "table" then
-    old_assigned = current_assigned.uniqueName or current_assigned.displayName or ""
-  elseif type(current_assigned) == "string" then
-    old_assigned = current_assigned
-  end
-
-  local patches = {}
-  if values.title ~= (fields["System.Title"] or "") then
-    table.insert(patches, { op = "replace", path = "/fields/System.Title", value = values.title })
-  end
-  if values.state ~= (fields["System.State"] or "New") then
-    table.insert(patches, { op = "replace", path = "/fields/System.State", value = values.state })
-  end
-  if values.assigned_to ~= old_assigned then
-    table.insert(patches, { op = "replace", path = "/fields/System.AssignedTo", value = values.assigned_to })
-  end
-  if values.description ~= (fields["System.Description"] or "") then
-    table.insert(patches, { op = "replace", path = "/fields/System.Description", value = values.description })
-  end
+  local patches = build_patches_from_editor(meta, values)
 
   if vim.tbl_isempty(patches) then
     vim.api.nvim_buf_set_option(bufnr, "modified", false)
+    vim.b[bufnr].taskmeister_save_status = "saved"
+    render_edit_dialog(bufnr, meta.original, get_cached_comments(bufnr))
     vim.notify("No changes to save for work item #" .. meta.id, vim.log.levels.INFO)
-    return
+    return true
   end
 
+  vim.b[bufnr].taskmeister_save_in_progress = true
+  vim.b[bufnr].taskmeister_save_status = "saving"
+  render_edit_status(bufnr, meta.original)
+  vim.notify("Saving work item #" .. meta.id .. "...", vim.log.levels.INFO)
+
   local updated, err = api.update_work_item_checked(meta.id, patches, meta.rev)
+  vim.b[bufnr].taskmeister_save_in_progress = false
+
   if not updated then
-    if err and err.is_conflict then
-      vim.notify(
-        "Work item #" .. meta.id .. " was updated remotely since revision " .. tostring(meta.rev) .. ". Reload and retry.",
-        vim.log.levels.WARN
-      )
-      return
-    end
-    vim.notify("Failed to save work item #" .. meta.id .. ": " .. (err and err.message or "unknown error"), vim.log.levels.ERROR)
-    return
+    vim.b[bufnr].taskmeister_save_status = "error"
+    render_edit_status(bufnr, meta.original)
+    notify_save_failure(meta, err)
+    return false
   end
 
   vim.b[bufnr].taskmeister_edit_meta = {
@@ -303,172 +387,302 @@ function M.save_work_item_dialog(bufnr)
     rev = updated.rev,
     original = updated,
   }
-  local comments = get_comments_with_reactions(meta.id)
-  render_edit_dialog(bufnr, updated, comments)
+  vim.b[bufnr].taskmeister_save_status = "saved"
+  render_edit_dialog(bufnr, updated, get_cached_comments(bufnr))
   vim.notify("Saved work item #" .. meta.id .. " at revision " .. tostring(updated.rev), vim.log.levels.INFO)
+  return true
 end
 
-function M.add_comment_to_dialog(bufnr)
-  if vim.bo[bufnr].modified then
-    M.save_work_item_dialog(bufnr)
-    if vim.bo[bufnr].modified then
-      vim.notify("Could not save pending edits, comment not added", vim.log.levels.WARN)
-      return
-    end
-  end
+function M.save_work_item_dialog_async(bufnr, callback)
   local meta = vim.b[bufnr].taskmeister_edit_meta
   if not meta or not meta.id then
     vim.notify("No edit metadata found for this buffer", vim.log.levels.ERROR)
-    return
-  end
-  local comment = vim.fn.input("Comment: ")
-  if comment == "" then
+    if callback then
+      callback(false)
+    end
     return
   end
 
-  api.add_work_item_comment_async(meta.id, comment, function(_, err)
+  if vim.b[bufnr].taskmeister_save_in_progress then
+    vim.notify("Save already in progress", vim.log.levels.INFO)
+    if callback then
+      callback(false)
+    end
+    return
+  end
+
+  local values = extract_editor_values(bufnr)
+  local patches = build_patches_from_editor(meta, values)
+
+  if vim.tbl_isempty(patches) then
+    vim.api.nvim_buf_set_option(bufnr, "modified", false)
+    vim.b[bufnr].taskmeister_save_status = "saved"
+    render_edit_dialog(bufnr, meta.original, get_cached_comments(bufnr))
+    vim.notify("No changes to save for work item #" .. meta.id, vim.log.levels.INFO)
+    if callback then
+      callback(true)
+    end
+    return
+  end
+
+  vim.b[bufnr].taskmeister_save_in_progress = true
+  vim.b[bufnr].taskmeister_save_status = "saving"
+  render_edit_status(bufnr, meta.original)
+  vim.notify("Saving work item #" .. meta.id .. "...", vim.log.levels.INFO)
+
+  api.update_work_item_checked_async(meta.id, patches, meta.rev, function(updated, err)
     vim.schedule(function()
       if not vim.api.nvim_buf_is_valid(bufnr) then
         return
       end
-      if err then
-        vim.notify("Failed to add comment: " .. (err or "unknown error"), vim.log.levels.ERROR)
+
+      vim.b[bufnr].taskmeister_save_in_progress = false
+
+      if not updated then
+        vim.b[bufnr].taskmeister_save_status = "error"
+        render_edit_status(bufnr, meta.original)
+        notify_save_failure(meta, err)
+        if callback then
+          callback(false)
+        end
         return
       end
 
-      api.get_work_items_batch_async({ meta.id }, function(items)
+      vim.b[bufnr].taskmeister_edit_meta = {
+        id = updated.id,
+        rev = updated.rev,
+        original = updated,
+      }
+      vim.b[bufnr].taskmeister_save_status = "saved"
+      local current_values = extract_editor_values(bufnr)
+      if not editor_values_equal(current_values, values) then
+        vim.b[bufnr].taskmeister_save_status = "saved_dirty"
+        render_edit_status(bufnr, updated)
+        vim.notify(
+          "Saved work item #" .. meta.id .. " at revision " .. tostring(updated.rev) .. "; local edits remain unsaved",
+          vim.log.levels.WARN
+        )
+        if callback then
+          callback(false)
+        end
+        return
+      end
+
+      render_edit_dialog(bufnr, updated, get_cached_comments(bufnr))
+      vim.notify("Saved work item #" .. meta.id .. " at revision " .. tostring(updated.rev), vim.log.levels.INFO)
+
+      if callback then
+        callback(true)
+      end
+
+      get_comments_with_reactions_async(meta.id, function(comments, comments_err)
         vim.schedule(function()
           if not vim.api.nvim_buf_is_valid(bufnr) then
             return
           end
-          local updated = (items and items[1]) or meta.original
-          vim.b[bufnr].taskmeister_edit_meta = {
-            id = updated.id,
-            rev = updated.rev,
-            original = updated,
-          }
-          get_comments_with_reactions_async(meta.id, function(comments)
-            vim.schedule(function()
-              if not vim.api.nvim_buf_is_valid(bufnr) then
-                return
-              end
-              render_edit_dialog(bufnr, updated, comments or {})
-              vim.notify("Added comment to work item #" .. meta.id, vim.log.levels.INFO)
-            end)
-          end)
+          local latest_meta = vim.b[bufnr].taskmeister_edit_meta
+          local latest_item = (latest_meta and latest_meta.original) or updated
+          if comments_err then
+            vim.notify("Failed to refresh comments: " .. comments_err, vim.log.levels.WARN)
+            return
+          end
+          if vim.bo[bufnr].modified then
+            vim.b[bufnr].taskmeister_edit_comments = comments or {}
+            return
+          end
+          render_edit_dialog(bufnr, latest_item, comments or {})
         end)
       end)
+      return
     end)
   end)
 end
 
-function M.react_to_comment_in_dialog(bufnr)
-  if vim.bo[bufnr].modified then
-    M.save_work_item_dialog(bufnr)
-    if vim.bo[bufnr].modified then
-      vim.notify("Could not save pending edits, reaction not added", vim.log.levels.WARN)
-      return
-    end
-  end
-  local meta = vim.b[bufnr].taskmeister_edit_meta
-  if not meta or not meta.id then
-    vim.notify("No edit metadata found for this buffer", vim.log.levels.ERROR)
+function M.add_comment_to_dialog(bufnr)
+  if vim.b[bufnr].taskmeister_save_in_progress then
+    vim.notify("Save already in progress", vim.log.levels.INFO)
     return
   end
 
-  get_comments_with_reactions_async(meta.id, function(comments, comments_err)
-    vim.schedule(function()
-      if not vim.api.nvim_buf_is_valid(bufnr) then
-        return
-      end
-      if comments_err then
-        vim.notify("Failed to fetch comments: " .. comments_err, vim.log.levels.ERROR)
-        return
-      end
-      if not comments or #comments == 0 then
-        vim.notify("No comments available for reactions", vim.log.levels.INFO)
-        return
-      end
+  local function continue_add_comment()
+    local meta = vim.b[bufnr].taskmeister_edit_meta
+    if not meta or not meta.id then
+      vim.notify("No edit metadata found for this buffer", vim.log.levels.ERROR)
+      return
+    end
+    local comment = vim.fn.input("Comment: ")
+    if comment == "" then
+      return
+    end
 
-      vim.ui.select(comments, {
-        prompt = "Select comment to react to",
-        format_item = function(comment)
-          local first = split_text(comment.value)[1] or ""
-          return string.format("#%d %s: %s", comment.id, comment.user, first)
-        end,
-      }, function(selected_comment)
-        if not selected_comment then
+    api.add_work_item_comment_async(meta.id, comment, function(_, err)
+      vim.schedule(function()
+        if not vim.api.nvim_buf_is_valid(bufnr) then
+          return
+        end
+        if err then
+          vim.notify("Failed to add comment: " .. (err or "unknown error"), vim.log.levels.ERROR)
           return
         end
 
-        vim.ui.select(REACTION_TYPES, {
-          prompt = "Select reaction",
-          format_item = function(reaction)
-            local icons = (config.options.ui and config.options.ui.icons) or {}
-            return string.format("%s %s", icons[reaction] or REACTION_ICONS[reaction] or "", reaction)
-          end,
-        }, function(reaction)
-          if not reaction then
-            return
-          end
-
-          local comment_id = selected_comment.id
-          local before_count = tonumber((selected_comment.reactions or {})[reaction]) or 0
-
-          local function on_toggled(action, ok, err)
-            vim.schedule(function()
-              if not vim.api.nvim_buf_is_valid(bufnr) then
-                return
-              end
-              if not ok then
-                vim.notify("Failed to toggle reaction: " .. (err or "unknown error"), vim.log.levels.ERROR)
-                return
-              end
-              api.get_work_items_batch_async({ meta.id }, function(items)
-                vim.schedule(function()
-                  if not vim.api.nvim_buf_is_valid(bufnr) then
-                    return
-                  end
-                  local latest = (items and items[1]) or meta.original
-                  vim.b[bufnr].taskmeister_edit_meta = {
-                    id = latest.id or meta.id,
-                    rev = latest.rev or meta.rev,
-                    original = latest,
-                  }
-                  get_comments_with_reactions_async(meta.id, function(updated_comments)
-                    vim.schedule(function()
-                      if not vim.api.nvim_buf_is_valid(bufnr) then
-                        return
-                      end
-                      render_edit_dialog(bufnr, latest, updated_comments or {})
-                      vim.notify("Reaction " .. action .. " on comment #" .. comment_id, vim.log.levels.INFO)
-                    end)
-                  end)
-                end)
-              end)
-            end)
-          end
-
-          api.add_comment_reaction_async(meta.id, comment_id, reaction, function(added_ok, add_err)
-            if not added_ok then
-              on_toggled("added", false, add_err)
+        api.get_work_items_batch_async({ meta.id }, function(items)
+          vim.schedule(function()
+            if not vim.api.nvim_buf_is_valid(bufnr) then
               return
             end
-            api.get_comment_reactions_async(meta.id, comment_id, function(after_reactions)
-              local after_count = tonumber((after_reactions or {})[reaction]) or 0
-              if after_count > before_count then
-                on_toggled("added", true, nil)
-                return
-              end
-              api.remove_comment_reaction_async(meta.id, comment_id, reaction, function(removed_ok, remove_err)
-                on_toggled("removed", removed_ok, remove_err)
+            local updated = (items and items[1]) or meta.original
+            vim.b[bufnr].taskmeister_edit_meta = {
+              id = updated.id,
+              rev = updated.rev,
+              original = updated,
+            }
+            get_comments_with_reactions_async(meta.id, function(comments)
+              vim.schedule(function()
+                if not vim.api.nvim_buf_is_valid(bufnr) then
+                  return
+                end
+                render_edit_dialog(bufnr, updated, comments or {})
+                vim.notify("Added comment to work item #" .. meta.id, vim.log.levels.INFO)
               end)
             end)
           end)
         end)
       end)
     end)
-  end)
+  end
+
+  if vim.bo[bufnr].modified then
+    M.save_work_item_dialog_async(bufnr, function(saved)
+      if not saved then
+        vim.notify("Could not save pending edits, comment not added", vim.log.levels.WARN)
+        return
+      end
+      continue_add_comment()
+    end)
+    return
+  end
+  continue_add_comment()
+end
+
+function M.react_to_comment_in_dialog(bufnr)
+  if vim.b[bufnr].taskmeister_save_in_progress then
+    vim.notify("Save already in progress", vim.log.levels.INFO)
+    return
+  end
+
+  local function continue_react_to_comment()
+    local meta = vim.b[bufnr].taskmeister_edit_meta
+    if not meta or not meta.id then
+      vim.notify("No edit metadata found for this buffer", vim.log.levels.ERROR)
+      return
+    end
+
+    get_comments_with_reactions_async(meta.id, function(comments, comments_err)
+      vim.schedule(function()
+        if not vim.api.nvim_buf_is_valid(bufnr) then
+          return
+        end
+        if comments_err then
+          vim.notify("Failed to fetch comments: " .. comments_err, vim.log.levels.ERROR)
+          return
+        end
+        if not comments or #comments == 0 then
+          vim.notify("No comments available for reactions", vim.log.levels.INFO)
+          return
+        end
+
+        vim.ui.select(comments, {
+          prompt = "Select comment to react to",
+          format_item = function(comment)
+            local first = split_text(comment.value)[1] or ""
+            return string.format("#%d %s: %s", comment.id, comment.user, first)
+          end,
+        }, function(selected_comment)
+          if not selected_comment then
+            return
+          end
+
+          vim.ui.select(REACTION_TYPES, {
+            prompt = "Select reaction",
+            format_item = function(reaction)
+              local icons = (config.options.ui and config.options.ui.icons) or {}
+              return string.format("%s %s", icons[reaction] or REACTION_ICONS[reaction] or "", reaction)
+            end,
+          }, function(reaction)
+            if not reaction then
+              return
+            end
+
+            local comment_id = selected_comment.id
+            local before_count = tonumber((selected_comment.reactions or {})[reaction]) or 0
+
+            local function on_toggled(action, ok, err)
+              vim.schedule(function()
+                if not vim.api.nvim_buf_is_valid(bufnr) then
+                  return
+                end
+                if not ok then
+                  vim.notify("Failed to toggle reaction: " .. (err or "unknown error"), vim.log.levels.ERROR)
+                  return
+                end
+                api.get_work_items_batch_async({ meta.id }, function(items)
+                  vim.schedule(function()
+                    if not vim.api.nvim_buf_is_valid(bufnr) then
+                      return
+                    end
+                    local latest = (items and items[1]) or meta.original
+                    vim.b[bufnr].taskmeister_edit_meta = {
+                      id = latest.id or meta.id,
+                      rev = latest.rev or meta.rev,
+                      original = latest,
+                    }
+                    get_comments_with_reactions_async(meta.id, function(updated_comments)
+                      vim.schedule(function()
+                        if not vim.api.nvim_buf_is_valid(bufnr) then
+                          return
+                        end
+                        render_edit_dialog(bufnr, latest, updated_comments or {})
+                        vim.notify("Reaction " .. action .. " on comment #" .. comment_id, vim.log.levels.INFO)
+                      end)
+                    end)
+                  end)
+                end)
+              end)
+            end
+
+            api.add_comment_reaction_async(meta.id, comment_id, reaction, function(added_ok, add_err)
+              if not added_ok then
+                on_toggled("added", false, add_err)
+                return
+              end
+              api.get_comment_reactions_async(meta.id, comment_id, function(after_reactions)
+                local after_count = tonumber((after_reactions or {})[reaction]) or 0
+                if after_count > before_count then
+                  on_toggled("added", true, nil)
+                  return
+                end
+                api.remove_comment_reaction_async(meta.id, comment_id, reaction, function(removed_ok, remove_err)
+                  on_toggled("removed", removed_ok, remove_err)
+                end)
+              end)
+            end)
+          end)
+        end)
+      end)
+    end)
+  end
+
+  if vim.bo[bufnr].modified then
+    M.save_work_item_dialog_async(bufnr, function(saved)
+      if not saved then
+        vim.notify("Could not save pending edits, reaction not added", vim.log.levels.WARN)
+        return
+      end
+      continue_react_to_comment()
+    end)
+    return
+  end
+  continue_react_to_comment()
 end
 
 function M.open_work_item_edit_dialog(id)
@@ -535,9 +749,16 @@ function M.open_work_item_edit_dialog(id)
   vim.api.nvim_create_autocmd("BufWriteCmd", {
     buffer = bufnr,
     callback = function()
-      M.save_work_item_dialog(bufnr)
+      M.save_work_item_dialog_sync(bufnr)
     end,
     desc = "Save Taskmeister work item edit dialog",
+  })
+  vim.api.nvim_create_autocmd({ "TextChanged", "TextChangedI", "InsertLeave", "BufModifiedSet" }, {
+    buffer = bufnr,
+    callback = function()
+      refresh_edit_save_status(bufnr)
+    end,
+    desc = "Refresh Taskmeister edit dialog save status",
   })
 
   api.get_work_items_batch_async({ id }, function(items, err)

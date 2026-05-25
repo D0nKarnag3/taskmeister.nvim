@@ -249,6 +249,18 @@ function M.create_work_item(type, patches)
   return vim.fn.json_decode(response.body)
 end
 
+local function update_conflict_error(response, expected_rev)
+  local message = parse_error(response, "HTTP " .. tostring(response.status))
+  local body = (response.body or ""):lower()
+  local is_conflict = expected_rev ~= nil and (
+    response.status == 409 or response.status == 412
+    or body:find("revision", 1, true) ~= nil
+    or body:find("conflict", 1, true) ~= nil
+    or body:find("does not match", 1, true) ~= nil
+  )
+  return { status = response.status, message = message, is_conflict = is_conflict }
+end
+
 function M.update_work_item_checked(id, patches, expected_rev)
   local opts = config.options
   local url = opts.base_url .. "/" .. opts.organization .. "/" .. opts.project .. "/_apis/wit/workitems/" .. id .. "?api-version=7.0"
@@ -269,28 +281,55 @@ function M.update_work_item_checked(id, patches, expected_rev)
   end
 
   if response.status ~= 200 then
-    local message = parse_error(response, "HTTP " .. tostring(response.status))
-    local body = (response.body or ""):lower()
-    local is_conflict = expected_rev ~= nil and (
-      response.status == 409 or response.status == 412
-      or body:find("revision", 1, true) ~= nil
-      or body:find("conflict", 1, true) ~= nil
-      or body:find("does not match", 1, true) ~= nil
-    )
-    return nil, { status = response.status, message = message, is_conflict = is_conflict }
+    return nil, update_conflict_error(response, expected_rev)
   end
 
   return vim.fn.json_decode(response.body), nil
 end
 
+function M.update_work_item_checked_async(id, patches, expected_rev, callback)
+  local opts = config.options
+  local url = opts.base_url .. "/" .. opts.organization .. "/" .. opts.project .. "/_apis/wit/workitems/" .. id .. "?api-version=7.0"
+  local payload = patches
+  if expected_rev ~= nil then
+    payload = vim.deepcopy(patches)
+    table.insert(payload, 1, { op = "test", path = "/rev", value = expected_rev })
+  end
+
+  curl.patch(url, {
+    headers = get_headers("application/json-patch+json"),
+    body = vim.fn.json_encode(payload),
+    timeout = 5000,
+    callback = function(response)
+      if response.status ~= 200 then
+        run_on_main(callback, nil, update_conflict_error(response, expected_rev))
+        return
+      end
+      run_on_main(callback, decode_json(response.body) or {}, nil)
+    end,
+    on_error = function(err)
+      run_on_main(callback, nil, { status = nil, message = err and err.message or "request failed", is_conflict = false })
+    end,
+  })
+end
+
 -- Update a work item
 function M.update_work_item(id, patches)
-  local result, err = M.update_work_item_checked(id, patches, nil)
-  if not result then
-    vim.notify("Update work item failed: " .. (err and err.message or "Unknown error"), vim.log.levels.ERROR)
+  local opts = config.options
+  local url = opts.base_url .. "/" .. opts.organization .. "/" .. opts.project .. "/_apis/wit/workitems/" .. id .. "?api-version=7.0"
+  local success, response = pcall(curl.patch, url, {
+    headers = get_headers("application/json-patch+json"),
+    body = vim.fn.json_encode(patches),
+    timeout = 5000,
+  })
+
+  if not success or response.status ~= 200 then
+    local message = success and parse_error(response, "HTTP " .. tostring(response.status)) or tostring(response)
+    vim.notify("Update work item failed: " .. (message or "Unknown error"), vim.log.levels.ERROR)
     error("Update work item failed")
   end
-  return result
+
+  return vim.fn.json_decode(response.body)
 end
 
 -- Get work item history
