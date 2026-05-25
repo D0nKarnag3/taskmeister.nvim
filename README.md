@@ -13,6 +13,7 @@ A Neovim plugin to interact with Azure DevOps work items directly within your ed
 ## ✨ Features
 
 - View and search work items from Azure DevOps
+- Open a personal work dashboard for assigned Azure DevOps items
 - Create new work items (e.g., tasks, bugs, features)
 - Update work item statuses and assign work
 - Seamlessly browse and filter work items by ID, title, or type
@@ -63,6 +64,7 @@ All commands are routed through a single entrypoint:
 | `open` | `[id]` | Open a work item buffer |
 | `edit` | `[id]` | Open the interactive edit dialog |
 | `create` | `<type>` | Create a new work item (`Task`, `Bug`, `Feature`, `User Story`) |
+| `dashboard` | none | Open a Telescope dashboard for work assigned to you |
 | `list` | `[search terms...]` | Open Telescope list, optionally filtered by title text |
 | `comment` | `[id]` | Add a comment to a work item |
 | `browser` | `[id]` | Open a work item in your browser |

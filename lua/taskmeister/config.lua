@@ -7,6 +7,15 @@ M.defaults = {
   base_url = 'https://dev.azure.com',
   show_work_item_icon = false,
   enable_work_item_details_auto_command = false,
+  dashboard = {
+    max_items = 100,
+    stale_after_days = 14,
+    recent_days = 7,
+    blocked_tags = { "Blocked" },
+    closed_states = { "Closed", "Done", "Removed" },
+    active_states = { "Active", "In Progress", "Committed", "Doing" },
+    new_states = { "New", "To Do", "Proposed" },
+  },
   ui = {
     use_signcolumn = true,
     timeline_indent = 2,

@@ -4,6 +4,15 @@ local Job = require('plenary.job')
 
 local M = {}
 
+local DEFAULT_WORK_ITEM_FIELDS = {
+  "System.Id",
+  "System.Title",
+  "System.WorkItemType",
+  "System.State",
+  "System.Description",
+  "System.AssignedTo",
+}
+
 -- Helper to construct API headers
 local function get_headers(content_type)
   local opts = config.options
@@ -162,8 +171,31 @@ function M.query_work_item_ids(wiql)
   return vim.tbl_map(function(item) return item.id end, result.workItems or {})
 end
 
+function M.query_work_item_ids_async(wiql, callback)
+  local opts = config.options
+  local url = opts.base_url .. "/" .. opts.organization .. "/" .. opts.project .. "/_apis/wit/wiql?api-version=7.0"
+
+  curl.post(url, {
+    headers = get_headers(),
+    body = vim.fn.json_encode({ query = wiql }),
+    timeout = 5000,
+    callback = function(response)
+      if response.status ~= 200 then
+        run_on_main(callback, nil, "HTTP " .. tostring(response.status) .. " - " .. tostring(response.body))
+        return
+      end
+      local result = decode_json(response.body) or {}
+      local ids = vim.tbl_map(function(item) return item.id end, result.workItems or {})
+      run_on_main(callback, ids, nil)
+    end,
+    on_error = function(err)
+      run_on_main(callback, nil, err and err.message or "request failed")
+    end,
+  })
+end
+
 -- Get work items in batch
-function M.get_work_items_batch(ids)
+function M.get_work_items_batch(ids, fields)
   local opts = config.options
   if vim.tbl_isempty(ids) then
     return {}
@@ -173,14 +205,7 @@ function M.get_work_items_batch(ids)
     headers = get_headers(),
     body = vim.fn.json_encode({
       ids = ids,
-      fields = {
-        "System.Id",
-        "System.Title",
-        "System.WorkItemType",
-        "System.State",
-        "System.Description",
-        "System.AssignedTo",
-      },
+      fields = fields or DEFAULT_WORK_ITEM_FIELDS,
     }),
     timeout = 5000,
   })
@@ -197,7 +222,7 @@ function M.get_work_items_batch(ids)
   return result.value
 end
 
-function M.get_work_items_batch_async(ids, callback)
+function M.get_work_items_batch_async(ids, callback, fields)
   local opts = config.options
   if vim.tbl_isempty(ids) then
     run_on_main(callback, {}, nil)
@@ -208,14 +233,7 @@ function M.get_work_items_batch_async(ids, callback)
     headers = get_headers(),
     body = vim.fn.json_encode({
       ids = ids,
-      fields = {
-        "System.Id",
-        "System.Title",
-        "System.WorkItemType",
-        "System.State",
-        "System.Description",
-        "System.AssignedTo",
-      },
+      fields = fields or DEFAULT_WORK_ITEM_FIELDS,
     }),
     timeout = 5000,
     callback = function(response)

@@ -373,6 +373,7 @@ function M.register()
     open = true,
     edit = true,
     create = true,
+    dashboard = true,
     list = true,
     comment = true,
     browser = true,
@@ -384,7 +385,7 @@ function M.register()
   vim.api.nvim_create_user_command("Taskmeister", function(args)
     local subcmd = args.fargs[1]
     if not subcmd or subcmd == "" then
-      vim.notify("Usage: :Taskmeister <open|edit|create|list|comment|browser|details|vt-show|vt-clear>", vim.log.levels.ERROR)
+      vim.notify("Usage: :Taskmeister <open|edit|create|dashboard|list|comment|browser|details|vt-show|vt-clear>", vim.log.levels.ERROR)
       return
     end
 
@@ -404,6 +405,8 @@ function M.register()
         return
       end
       require("taskmeister.ui").create_work_item(item_type)
+    elseif subcmd == "dashboard" then
+      require("taskmeister.dashboard").open()
     elseif subcmd == "list" then
       local search = table.concat(args.fargs, " ", 2)
       if search == "" then
