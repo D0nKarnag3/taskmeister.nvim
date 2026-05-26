@@ -536,6 +536,22 @@ function M.register()
   vim.api.nvim_set_hl(0, "TaskmeisterPurple", { fg = "#C586C0" })
   vim.api.nvim_set_hl(0, "TaskmeisterBlue", { fg = "#0078D4" })
   vim.api.nvim_set_hl(0, "TaskmeisterComment", { fg = "#D7BA7D" }) -- New highlight for comments
+  vim.api.nvim_set_hl(0, "TaskmeisterMuted", { fg = "#8B949E" })
+  vim.api.nvim_set_hl(0, "TaskmeisterReactionCount", { fg = "#C8D1E0" })
+
+  local function set_badge(cap_hl, body_hl, bg, fg)
+    vim.api.nvim_set_hl(0, cap_hl, { fg = bg })
+    vim.api.nvim_set_hl(0, body_hl, { fg = fg, bg = bg, bold = true })
+  end
+
+  set_badge("TaskmeisterTagBadgeCap", "TaskmeisterTagBadge", "#D8E8E2", "#1F2328")
+  set_badge("TaskmeisterReactionLikeCap", "TaskmeisterReactionLikeBadge", "#3B4258", "#F2CC60")
+  set_badge("TaskmeisterReactionDislikeCap", "TaskmeisterReactionDislikeBadge", "#3B4258", "#F2CC60")
+  set_badge("TaskmeisterReactionHeartCap", "TaskmeisterReactionHeartBadge", "#5A2335", "#FF7B9C")
+  set_badge("TaskmeisterReactionHoorayCap", "TaskmeisterReactionHoorayBadge", "#4EA1FF", "#102033")
+  set_badge("TaskmeisterReactionLaughCap", "TaskmeisterReactionLaughBadge", "#4A3B1F", "#FFD166")
+  set_badge("TaskmeisterReactionConfusedCap", "TaskmeisterReactionConfusedBadge", "#4B3D5F", "#D9B8FF")
+  set_badge("TaskmeisterReactionDefaultCap", "TaskmeisterReactionDefaultBadge", "#3B4258", "#DDE6F3")
   if not config.ui or not config.ui.use_signcolumn then
     vim.api.nvim_set_hl(0, "TaskmeisterSignColumn", { link = "Normal" })
   end

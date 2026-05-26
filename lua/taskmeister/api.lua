@@ -11,6 +11,7 @@ local DEFAULT_WORK_ITEM_FIELDS = {
   "System.State",
   "System.Description",
   "System.AssignedTo",
+  "System.Tags",
 }
 
 -- Helper to construct API headers

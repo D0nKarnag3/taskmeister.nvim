@@ -1,4 +1,5 @@
 local api = require("taskmeister.api")
+local badges = require("taskmeister.badges")
 local buffer = require("taskmeister.buffer")
 local config = require("taskmeister.config")
 
@@ -6,24 +7,11 @@ local M = {}
 
 local buffers = {}  -- Track open work items by ID
 local edit_ns = vim.api.nvim_create_namespace("taskmeister_edit")
+local edit_tag_ns = vim.api.nvim_create_namespace("taskmeister_edit_tags")
 local status_ns = vim.api.nvim_create_namespace("taskmeister_edit_status")
 local COMMENTS_MARKER = "──────────────── Comments ────────────────"
-local REACTION_TYPES = {
-  "like",
-  "dislike",
-  "heart",
-  "hooray",
-  "laugh",
-  "confused",
-}
-local REACTION_ICONS = {
-  like = "👍",
-  dislike = "👎",
-  heart = "❤️",
-  hooray = "🎉",
-  laugh = "😄",
-  confused = "😕",
-}
+local REACTION_TYPES = badges.reaction_types
+local EDIT_TAG_LINE = 3
 
 M.buffers = buffers
 
@@ -49,8 +37,9 @@ local function extract_editor_values(bufnr)
   local title = lines[1] or ""
   local state = lines[2] or ""
   local assigned = lines[3] or ""
+  local tags = lines[4] or ""
   local description_lines = {}
-  for i = 5, #lines do
+  for i = 6, #lines do
     if lines[i] == COMMENTS_MARKER then
       break
     end
@@ -63,6 +52,7 @@ local function extract_editor_values(bufnr)
     title = title,
     state = state,
     assigned_to = assigned,
+    tags = tags,
     description = table.concat(description_lines, "\n"),
   }
 end
@@ -110,6 +100,9 @@ local function build_patches_from_editor(meta, values)
   if values.assigned_to ~= old_assigned then
     table.insert(patches, { op = "replace", path = "/fields/System.AssignedTo", value = values.assigned_to })
   end
+  if values.tags ~= (fields["System.Tags"] or "") then
+    table.insert(patches, { op = "replace", path = "/fields/System.Tags", value = values.tags })
+  end
   if values.description ~= (fields["System.Description"] or "") then
     table.insert(patches, { op = "replace", path = "/fields/System.Description", value = values.description })
   end
@@ -120,6 +113,7 @@ local function editor_values_equal(left, right)
   return left.title == right.title
     and left.state == right.state
     and left.assigned_to == right.assigned_to
+    and left.tags == right.tags
     and left.description == right.description
 end
 
@@ -127,16 +121,40 @@ local function get_cached_comments(bufnr)
   return vim.b[bufnr].taskmeister_edit_comments or {}
 end
 
-local function render_edit_status(bufnr, item)
+local function refresh_edit_tag_badges(bufnr)
+  if not vim.api.nvim_buf_is_valid(bufnr) then
+    return
+  end
+  vim.api.nvim_buf_clear_namespace(bufnr, edit_tag_ns, 0, -1)
+  local tag_line = vim.api.nvim_buf_get_lines(bufnr, EDIT_TAG_LINE, EDIT_TAG_LINE + 1, false)[1]
+  if tag_line == nil then
+    return
+  end
+  badges.decorate_tag_field(bufnr, edit_tag_ns, EDIT_TAG_LINE, tag_line, 0, {
+    { "Tags: ", "TaskmeisterBlue" },
+  })
+end
+
+local function render_edit_status(bufnr, item, values)
   local save_status_text, save_status_hl = current_save_status(bufnr, item.rev)
+  local fields = item.fields or {}
+  local tag_value = values and values.tags or fields["System.Tags"] or ""
+  local virt_lines = {
+    { { string.format("Work Item #%s • rev %s", tostring(item.id), tostring(item.rev)), "TaskmeisterBlue" } },
+  }
+  local tag_chunks = badges.tag_chunks(tag_value)
+  if #tag_chunks > 0 then
+    local line = { { "Labels: ", "TaskmeisterBlue" } }
+    vim.list_extend(line, tag_chunks)
+    table.insert(virt_lines, line)
+  end
+  table.insert(virt_lines, { { save_status_text, save_status_hl } })
+  table.insert(virt_lines, { { "Save: :w / <C-s>   Add comment: <leader>wc   React: <leader>wr   Close: q", "Comment" } })
+  table.insert(virt_lines, { { "", "Normal" } })
+
   vim.api.nvim_buf_clear_namespace(bufnr, status_ns, 0, -1)
   vim.api.nvim_buf_set_extmark(bufnr, status_ns, 0, 0, {
-    virt_lines = {
-      { { string.format("Work Item #%s • rev %s", tostring(item.id), tostring(item.rev)), "TaskmeisterBlue" } },
-      { { save_status_text, save_status_hl } },
-      { { "Save: :w / <C-s>   Add comment: <leader>wc   React: <leader>wr   Close: q", "Comment" } },
-      { { "", "Normal" } },
-    },
+    virt_lines = virt_lines,
     virt_lines_above = true,
   })
 end
@@ -149,13 +167,14 @@ local function refresh_edit_save_status(bufnr)
   if not meta or not meta.original then
     return
   end
+  local values = extract_editor_values(bufnr)
+  refresh_edit_tag_badges(bufnr)
   if vim.b[bufnr].taskmeister_save_in_progress then
     vim.b[bufnr].taskmeister_save_status = "saving"
-    render_edit_status(bufnr, meta.original)
+    render_edit_status(bufnr, meta.original, values)
     return
   end
 
-  local values = extract_editor_values(bufnr)
   local patches = build_patches_from_editor(meta, values)
   if vim.tbl_isempty(patches) then
     if vim.b[bufnr].taskmeister_save_status ~= "saved" then
@@ -164,7 +183,7 @@ local function refresh_edit_save_status(bufnr)
   else
     vim.b[bufnr].taskmeister_save_status = "dirty"
   end
-  render_edit_status(bufnr, meta.original)
+  render_edit_status(bufnr, meta.original, values)
 end
 
 local function get_comments_with_reactions_async(work_item_id, callback)
@@ -202,18 +221,9 @@ local function render_loading(bufnr, id)
   vim.api.nvim_buf_set_option(bufnr, "modifiable", false)
 end
 
-local function reaction_bubbles(reactions)
+local function reaction_badges(reactions)
   local icons = (config.options.ui and config.options.ui.icons) or {}
-  local delimiter = (config.options.ui and config.options.ui.bubble_delimiter) or "│"
-  local chunks = {}
-  for _, reaction in ipairs(REACTION_TYPES) do
-    local count = reactions[reaction]
-    if count and count > 0 then
-      local icon = icons[reaction] or REACTION_ICONS[reaction] or reaction
-      table.insert(chunks, { string.format(" %s%s %d%s", delimiter, icon, count, delimiter), "TaskmeisterBlue" })
-    end
-  end
-  return chunks
+  return badges.reaction_chunks(reactions, icons)
 end
 
 local function render_edit_dialog(bufnr, item, comments)
@@ -230,11 +240,13 @@ local function render_edit_dialog(bufnr, item, comments)
   elseif type(assigned_to) == "string" then
     assigned = assigned_to
   end
+  local tags = fields["System.Tags"] or ""
   local description_lines = split_text(fields["System.Description"] or "")
   local lines = {
     title,
     state,
     assigned,
+    tags,
     "",
   }
   vim.list_extend(lines, description_lines)
@@ -275,14 +287,15 @@ local function render_edit_dialog(bufnr, item, comments)
     virt_text = { { "Assigned To: ", "TaskmeisterBlue" } },
     virt_text_pos = "inline",
   })
-  vim.api.nvim_buf_set_extmark(bufnr, edit_ns, 3, 0, {
+  vim.api.nvim_buf_set_extmark(bufnr, edit_ns, 4, 0, {
     virt_text = { { "Description:", "TaskmeisterBlue" } },
     virt_text_pos = "inline",
   })
+  refresh_edit_tag_badges(bufnr)
   vim.api.nvim_buf_add_highlight(bufnr, edit_ns, "TaskmeisterBlue", comments_start - 1, 0, -1)
 
   local line_count = vim.api.nvim_buf_line_count(bufnr)
-  for i = comments_start + 1, line_count do
+  for i = comments_start, line_count do
     local line = (vim.api.nvim_buf_get_lines(bufnr, i - 1, i, false)[1] or "")
     if line:match("^%[#%d+%]") then
       vim.api.nvim_buf_add_highlight(bufnr, edit_ns, "TaskmeisterComment", i - 1, 0, -1)
@@ -290,10 +303,10 @@ local function render_edit_dialog(bufnr, item, comments)
   end
 
   for _, row in ipairs(comment_rows) do
-    local bubbles = reaction_bubbles(row.reactions)
-    if #bubbles > 0 then
+    local chunks = reaction_badges(row.reactions)
+    if #chunks > 0 then
       vim.api.nvim_buf_set_extmark(bufnr, edit_ns, row.line, row.col, {
-        virt_text = bubbles,
+        virt_text = chunks,
         virt_text_pos = "inline",
       })
     end
@@ -323,7 +336,7 @@ function M.open_work_item(id)
   vim.api.nvim_buf_set_option(bufnr, "filetype", "taskmeister")
   vim.api.nvim_buf_set_option(bufnr, "buftype", "acwrite")
   vim.api.nvim_buf_set_option(bufnr, "bufhidden", "wipe")
-  if config.ui and config.ui.use_signcolumn then
+  if config.options.ui and config.options.ui.use_signcolumn then
     vim.api.nvim_buf_set_option(bufnr, "signcolumn", "yes:1")
   end
   vim.api.nvim_set_current_buf(bufnr)
@@ -369,7 +382,7 @@ function M.save_work_item_dialog_sync(bufnr)
 
   vim.b[bufnr].taskmeister_save_in_progress = true
   vim.b[bufnr].taskmeister_save_status = "saving"
-  render_edit_status(bufnr, meta.original)
+  render_edit_status(bufnr, meta.original, values)
   vim.notify("Saving work item #" .. meta.id .. "...", vim.log.levels.INFO)
 
   local updated, err = api.update_work_item_checked(meta.id, patches, meta.rev)
@@ -377,7 +390,7 @@ function M.save_work_item_dialog_sync(bufnr)
 
   if not updated then
     vim.b[bufnr].taskmeister_save_status = "error"
-    render_edit_status(bufnr, meta.original)
+    render_edit_status(bufnr, meta.original, values)
     notify_save_failure(meta, err)
     return false
   end
@@ -427,7 +440,7 @@ function M.save_work_item_dialog_async(bufnr, callback)
 
   vim.b[bufnr].taskmeister_save_in_progress = true
   vim.b[bufnr].taskmeister_save_status = "saving"
-  render_edit_status(bufnr, meta.original)
+  render_edit_status(bufnr, meta.original, values)
   vim.notify("Saving work item #" .. meta.id .. "...", vim.log.levels.INFO)
 
   api.update_work_item_checked_async(meta.id, patches, meta.rev, function(updated, err)
@@ -440,7 +453,7 @@ function M.save_work_item_dialog_async(bufnr, callback)
 
       if not updated then
         vim.b[bufnr].taskmeister_save_status = "error"
-        render_edit_status(bufnr, meta.original)
+        render_edit_status(bufnr, meta.original, values)
         notify_save_failure(meta, err)
         if callback then
           callback(false)
@@ -457,7 +470,7 @@ function M.save_work_item_dialog_async(bufnr, callback)
       local current_values = extract_editor_values(bufnr)
       if not editor_values_equal(current_values, values) then
         vim.b[bufnr].taskmeister_save_status = "saved_dirty"
-        render_edit_status(bufnr, updated)
+        render_edit_status(bufnr, updated, current_values)
         vim.notify(
           "Saved work item #" .. meta.id .. " at revision " .. tostring(updated.rev) .. "; local edits remain unsaved",
           vim.log.levels.WARN
@@ -606,7 +619,7 @@ function M.react_to_comment_in_dialog(bufnr)
             prompt = "Select reaction",
             format_item = function(reaction)
               local icons = (config.options.ui and config.options.ui.icons) or {}
-              return string.format("%s %s", icons[reaction] or REACTION_ICONS[reaction] or "", reaction)
+              return string.format("%s %s", badges.reaction_icon(reaction, icons), reaction)
             end,
           }, function(reaction)
             if not reaction then
@@ -809,7 +822,7 @@ function M.create_work_item(type)
   vim.api.nvim_buf_set_option(bufnr, "filetype", "taskmeister")
   vim.api.nvim_buf_set_option(bufnr, "buftype", "acwrite")
   vim.api.nvim_buf_set_option(bufnr, "bufhidden", "wipe")
-  if config.ui and config.ui.use_signcolumn then
+  if config.options.ui and config.options.ui.use_signcolumn then
     vim.api.nvim_buf_set_option(bufnr, "signcolumn", "yes:1")
   end
   vim.api.nvim_set_current_buf(bufnr)
@@ -834,6 +847,9 @@ function M.sync_buffer(bufnr)
   end
   if changes.assigned_to and changes.assigned_to ~= (item.fields and item.fields["System.AssignedTo"] and item.fields["System.AssignedTo"].uniqueName or "") then
     table.insert(patches, { op = "replace", path = "/fields/System.AssignedTo", value = changes.assigned_to })
+  end
+  if changes.tags ~= (item.fields and item.fields["System.Tags"] or "") then
+    table.insert(patches, { op = "replace", path = "/fields/System.Tags", value = changes.tags or "" })
   end
   if not vim.tbl_isempty(patches) then
     if is_new then

@@ -1,5 +1,6 @@
 local config = require("taskmeister.config")
 local api = require("taskmeister.api")
+local badges = require("taskmeister.badges")
 
 local M = {}
 
@@ -21,14 +22,15 @@ local function render_markdown(text)
 end
 
 function M.render_work_item(bufnr, item, is_new)
-  vim.api.nvim_buf_set_lines(bufnr, 0, -1, false, {})
   local opts = config.options
 
     -- Header with work item ID and type
   local work_item_type = item.fields and item.fields["System.WorkItemType"] or (is_new and item.type or "")
-  local icon = (config.ui and config.ui.icons and config.ui.icons[work_item_type] or "• ") or "• "
+  local ui = opts.ui or {}
+  local icons = ui.icons or {}
+  local icon = icons[work_item_type] or "• "
   local id = item.id or "New"
-  vim.api.nvim_buf_set_lines(bufnr, -1, -1, false, { string.format("%s #%s %s", icon, id, work_item_type) })
+  vim.api.nvim_buf_set_lines(bufnr, 0, -1, false, { string.format("%s #%s %s", icon, id, work_item_type) })
   vim.api.nvim_buf_add_highlight(bufnr, ns_id, "TaskmeisterBlue", 0, 0, -1)
 
   -- Title (editable content, non-editable label)
@@ -49,11 +51,11 @@ function M.render_work_item(bufnr, item, is_new)
   })
   local state_line = vim.api.nvim_buf_get_lines(bufnr, 2, 3, false)[1] or ""
   if state_line ~= "" then
-    local state_icon = (config.ui and config.ui.icons and config.ui.icons["state_" .. string.lower(state)] or { icon = "", hl = "TaskmeisterBlue" }) or { icon = "", hl = "TaskmeisterBlue" }
+    local state_icon = icons["state_" .. string.lower(state)] or { icon = "", hl = "TaskmeisterBlue" }
     local col = math.min(#state_line, #state)
     if col > 0 then
       vim.api.nvim_buf_set_extmark(bufnr, ns_id, 2, col, {
-        virt_text = { { (config.ui and config.ui.bubble_delimiter or "│") .. (state_icon.icon or "") .. (config.ui and config.ui.bubble_delimiter or "│"), state_icon.hl or "TaskmeisterBlue" } },
+        virt_text = { { (ui.bubble_delimiter or "│") .. (state_icon.icon or "") .. (ui.bubble_delimiter or "│"), state_icon.hl or "TaskmeisterBlue" } },
         virt_text_pos = "inline",
       })
     end
@@ -68,20 +70,32 @@ function M.render_work_item(bufnr, item, is_new)
   })
   local assigned_line = vim.api.nvim_buf_get_lines(bufnr, 3, 4, false)[1] or ""
   if assigned_line ~= "" then
-    local assigned_icon = (config.ui and config.ui.icons and config.ui.icons.assigned or "󰘵 ") or "• "
+    local assigned_icon = icons.assigned or "󰘵 "
     local col = math.min(#assigned_line, #assigned)
     if col > 0 then
       vim.api.nvim_buf_set_extmark(bufnr, ns_id, 3, col, {
-        virt_text = { { (config.ui and config.ui.bubble_delimiter or "│") .. assigned_icon .. (config.ui and config.ui.bubble_delimiter or "│"), "TaskmeisterBlue" } },
+        virt_text = { { (ui.bubble_delimiter or "│") .. assigned_icon .. (ui.bubble_delimiter or "│"), "TaskmeisterBlue" } },
         virt_text_pos = "inline",
       })
     end
   end
 
+  local tags = (item.fields and item.fields["System.Tags"] or "") or ""
+  local tag_chunks = badges.tag_chunks(tags)
+  local tag_prefix = "Labels: "
+  local tag_line = tag_prefix .. (#tag_chunks > 0 and tags or "none")
+  vim.api.nvim_buf_set_lines(bufnr, -1, -1, false, { tag_line })
+  local tag_line_nr = vim.api.nvim_buf_line_count(bufnr) - 1
+  vim.api.nvim_buf_add_highlight(bufnr, ns_id, "TaskmeisterBlue", tag_line_nr, 0, 7)
+  if #tag_chunks > 0 then
+    badges.decorate_tag_field(bufnr, ns_id, tag_line_nr, tag_line, #tag_prefix)
+  end
+
   -- Description (editable content, non-editable label)
   local description = (item.fields and item.fields["System.Description"] or "") or ""
   vim.api.nvim_buf_set_lines(bufnr, -1, -1, false, { "" })
-  vim.api.nvim_buf_set_extmark(bufnr, ns_id, 4, 0, {
+  local description_label_line = vim.api.nvim_buf_line_count(bufnr) - 1
+  vim.api.nvim_buf_set_extmark(bufnr, ns_id, description_label_line, 0, {
     virt_text = { { "Description", "TaskmeisterBlue" } },
     virt_text_pos = "eol",
   })
@@ -89,18 +103,21 @@ function M.render_work_item(bufnr, item, is_new)
 
   -- Timeline/Comments
   local history = item.id and api.get_work_item_history(item.id) or {}
+  local comments = item.id and api.get_work_item_comments(item.id) or {}
+  local comment_index = 0
   vim.api.nvim_buf_set_lines(bufnr, -1, -1, false, { "" })
   vim.api.nvim_buf_set_extmark(bufnr, ns_id, vim.api.nvim_buf_line_count(bufnr) - 1, 0, {
     virt_text = { { "Timeline", "TaskmeisterBlue" } },
     virt_text_pos = "eol",
   })
   for i, event in ipairs(history) do
-    local indent = string.rep(" ", config.ui and config.ui.timeline_indent or 2)
-    local marker = (config.ui and config.ui.icons and config.ui.icons[event.type] or "• ") or "• "
+    local indent = string.rep(" ", ui.timeline_indent or 2)
+    local marker = icons[event.type] or "• "
     local timestamp = event.timestamp or "N/A"
     local user = event.user or "System"
     local header_hl = event.type == "comment" and "TaskmeisterComment" or "TaskmeisterBlue"
     local header = string.format("%s%s %s %s", indent, marker, user, timestamp)
+    local header_line = vim.api.nvim_buf_line_count(bufnr)
     vim.api.nvim_buf_set_lines(bufnr, -1, -1, false, { header })
     local event_lines = render_markdown(event.value or "")
     for _, line in ipairs(event_lines) do
@@ -108,23 +125,18 @@ function M.render_work_item(bufnr, item, is_new)
       vim.api.nvim_buf_add_highlight(bufnr, ns_id, header_hl, vim.api.nvim_buf_line_count(bufnr) - 1, 0, -1)
     end
     vim.api.nvim_buf_set_lines(bufnr, -1, -1, false, { indent .. string.rep("─", 60) })
-    vim.api.nvim_buf_set_extmark(bufnr, ns_id, vim.api.nvim_buf_line_count(bufnr) - #event_lines - 2, 0, {
+    vim.api.nvim_buf_set_extmark(bufnr, ns_id, header_line, 0, {
       virt_text = { { marker, header_hl } },
       virt_text_pos = "inline",
     })
     -- Add reactions bubble if event.type == "comment"
     if event.type == "comment" then
-      local reactions = api.get_comment_reactions(id, event.rev) or {}
-      local reaction_bubble = ""
-      for r_type, count in pairs(reactions) do
-        local r_icon = config.ui.icons[r_type] or ""
-        if count > 0 then
-          reaction_bubble = reaction_bubble .. " [" .. r_icon .. " " .. count .. "]"
-        end
-      end
-      if reaction_bubble ~= "" then
-        vim.api.nvim_buf_set_extmark(bufnr, ns_id, vim.api.nvim_buf_line_count(bufnr) - #event_lines - 3, #header, {
-          virt_text = { { reaction_bubble, "TaskmeisterBlue" } },
+      comment_index = comment_index + 1
+      local comment = comments[comment_index] or {}
+      local reaction_chunks = badges.reaction_chunks(comment.reactions or {}, icons)
+      if #reaction_chunks > 0 then
+        vim.api.nvim_buf_set_extmark(bufnr, ns_id, header_line, #header, {
+          virt_text = reaction_chunks,
           virt_text_pos = "inline",
         })
       end
@@ -147,6 +159,7 @@ function M.parse_changes(lines, data)
     description = data.fields and data.fields["System.Description"] or "",
     state = data.fields and data.fields["System.State"] or "New",
     assigned_to = data.fields and data.fields["System.AssignedTo"] and data.fields["System.AssignedTo"].uniqueName or "",
+    tags = data.fields and data.fields["System.Tags"] or "",
   }
   local in_desc = false
   local desc_lines = {}
@@ -158,7 +171,12 @@ function M.parse_changes(lines, data)
       parsed.state = line or ""
     elseif i == 4 then
       parsed.assigned_to = line or ""
-    elseif line == "" and i > 4 then
+    elseif i == 5 then
+      parsed.tags = (line or ""):gsub("^Labels:%s*", "")
+      if parsed.tags == "none" then
+        parsed.tags = ""
+      end
+    elseif line == "" and i > 5 then
       in_desc = true
       line_idx = i + 1
     elseif in_desc and line:match("^%s*$") then
