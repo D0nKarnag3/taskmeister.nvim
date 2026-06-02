@@ -7,11 +7,30 @@ local M = {}
 
 local buffers = {}  -- Track open work items by ID
 local edit_ns = vim.api.nvim_create_namespace("taskmeister_edit")
+local edit_label_ns = vim.api.nvim_create_namespace("taskmeister_edit_labels")
 local edit_tag_ns = vim.api.nvim_create_namespace("taskmeister_edit_tags")
 local status_ns = vim.api.nvim_create_namespace("taskmeister_edit_status")
 local COMMENTS_MARKER = "──────────────── Comments ────────────────"
 local REACTION_TYPES = badges.reaction_types
-local EDIT_TAG_LINE = 3
+local EDIT_FIELD_LAYOUTS = {
+  title = { line = 0, label = "Title: " },
+  state = { line = 1, label = "State: " },
+  assigned_to = { line = 2, label = "Assigned To: " },
+  tags = { line = 3, label = "Tags: " },
+}
+local EDIT_FIELD_ORDER = { "title", "state", "assigned_to", "tags" }
+for _, layout in pairs(EDIT_FIELD_LAYOUTS) do
+  layout.value_col = #layout.label
+  layout.padding = string.rep(" ", layout.value_col)
+end
+local EDIT_TAG_LINE = EDIT_FIELD_LAYOUTS.tags.line
+local EDIT_FIELDS = {
+  { key = "title", label = "Title", path = "/fields/System.Title" },
+  { key = "state", label = "State", path = "/fields/System.State" },
+  { key = "assigned_to", label = "Assigned To", path = "/fields/System.AssignedTo" },
+  { key = "tags", label = "Tags", path = "/fields/System.Tags" },
+  { key = "description", label = "Description", path = "/fields/System.Description" },
+}
 
 M.buffers = buffers
 
@@ -32,12 +51,75 @@ local function split_text(value)
   return vim.split(value, "\n", { plain = true })
 end
 
+local function assigned_value(fields)
+  local assigned = fields["System.AssignedTo"]
+  if type(assigned) == "table" then
+    return assigned.uniqueName or assigned.displayName or ""
+  end
+  if type(assigned) == "string" then
+    return assigned
+  end
+  return ""
+end
+
+local function editor_values_from_item(item)
+  local fields = (item or {}).fields or {}
+  return {
+    title = fields["System.Title"] or "",
+    state = fields["System.State"] or "New",
+    assigned_to = assigned_value(fields),
+    tags = fields["System.Tags"] or "",
+    description = fields["System.Description"] or "",
+  }
+end
+
+local function extract_labeled_value(value, layout)
+  value = tostring(value or "")
+  if value:sub(1, layout.value_col) == layout.padding then
+    return value:sub(layout.value_col + 1)
+  end
+  if value:sub(1, #layout.label) == layout.label then
+    return value:sub(layout.value_col + 1)
+  end
+  local leading_spaces = value:match("^%s*") or ""
+  if #leading_spaces > 0 and #leading_spaces < layout.value_col then
+    return value:sub(#leading_spaces + 1)
+  end
+  if #value >= layout.value_col then
+    return value:sub(layout.value_col + 1)
+  end
+  return ""
+end
+
+local function labeled_edit_line(key, value)
+  local layout = EDIT_FIELD_LAYOUTS[key]
+  return layout.padding .. tostring(value or "")
+end
+
+local function normalize_labeled_line(bufnr, key)
+  if not vim.api.nvim_buf_is_valid(bufnr) then
+    return nil
+  end
+  local layout = EDIT_FIELD_LAYOUTS[key]
+  local line = vim.api.nvim_buf_get_lines(bufnr, layout.line, layout.line + 1, false)[1]
+  if line == nil then
+    return nil
+  end
+  if line:sub(1, layout.value_col) == layout.padding then
+    return line
+  end
+
+  local fixed = labeled_edit_line(key, extract_labeled_value(line, layout))
+  vim.api.nvim_buf_set_lines(bufnr, layout.line, layout.line + 1, false, { fixed })
+  return fixed
+end
+
 local function extract_editor_values(bufnr)
+  local title = extract_labeled_value(normalize_labeled_line(bufnr, "title"), EDIT_FIELD_LAYOUTS.title)
+  local state = extract_labeled_value(normalize_labeled_line(bufnr, "state"), EDIT_FIELD_LAYOUTS.state)
+  local assigned = extract_labeled_value(normalize_labeled_line(bufnr, "assigned_to"), EDIT_FIELD_LAYOUTS.assigned_to)
+  local tags = extract_labeled_value(normalize_labeled_line(bufnr, "tags"), EDIT_FIELD_LAYOUTS.tags)
   local lines = vim.api.nvim_buf_get_lines(bufnr, 0, -1, false)
-  local title = lines[1] or ""
-  local state = lines[2] or ""
-  local assigned = lines[3] or ""
-  local tags = lines[4] or ""
   local description_lines = {}
   for i = 6, #lines do
     if lines[i] == COMMENTS_MARKER then
@@ -55,6 +137,24 @@ local function extract_editor_values(bufnr)
     tags = tags,
     description = table.concat(description_lines, "\n"),
   }
+end
+
+local function changed_fields_from_editor(meta, values)
+  local changed_fields = {}
+  local changed_keys = {}
+  if not meta or not meta.original or not values then
+    return changed_fields, changed_keys
+  end
+
+  local original = editor_values_from_item(meta.original)
+  for _, field in ipairs(EDIT_FIELDS) do
+    if values[field.key] ~= original[field.key] then
+      table.insert(changed_fields, field)
+      changed_keys[field.key] = true
+    end
+  end
+
+  return changed_fields, changed_keys
 end
 
 local function current_save_status(bufnr, rev)
@@ -81,30 +181,10 @@ local function current_save_status(bufnr, rev)
 end
 
 local function build_patches_from_editor(meta, values)
-  local fields = meta.original.fields or {}
-  local old_assigned = ""
-  local current_assigned = fields["System.AssignedTo"]
-  if type(current_assigned) == "table" then
-    old_assigned = current_assigned.uniqueName or current_assigned.displayName or ""
-  elseif type(current_assigned) == "string" then
-    old_assigned = current_assigned
-  end
-
   local patches = {}
-  if values.title ~= (fields["System.Title"] or "") then
-    table.insert(patches, { op = "replace", path = "/fields/System.Title", value = values.title })
-  end
-  if values.state ~= (fields["System.State"] or "New") then
-    table.insert(patches, { op = "replace", path = "/fields/System.State", value = values.state })
-  end
-  if values.assigned_to ~= old_assigned then
-    table.insert(patches, { op = "replace", path = "/fields/System.AssignedTo", value = values.assigned_to })
-  end
-  if values.tags ~= (fields["System.Tags"] or "") then
-    table.insert(patches, { op = "replace", path = "/fields/System.Tags", value = values.tags })
-  end
-  if values.description ~= (fields["System.Description"] or "") then
-    table.insert(patches, { op = "replace", path = "/fields/System.Description", value = values.description })
+  local changed_fields = changed_fields_from_editor(meta, values)
+  for _, field in ipairs(changed_fields) do
+    table.insert(patches, { op = "replace", path = field.path, value = values[field.key] })
   end
   return patches
 end
@@ -121,24 +201,54 @@ local function get_cached_comments(bufnr)
   return vim.b[bufnr].taskmeister_edit_comments or {}
 end
 
-local function refresh_edit_tag_badges(bufnr)
+local function refresh_edit_field_labels(bufnr, changed_keys)
   if not vim.api.nvim_buf_is_valid(bufnr) then
     return
   end
+  changed_keys = changed_keys or {}
+  vim.api.nvim_buf_clear_namespace(bufnr, edit_label_ns, 0, -1)
+
+  local function label_hl(key)
+    return changed_keys[key] and "TaskmeisterChangedField" or "TaskmeisterBlue"
+  end
+
+  for _, key in ipairs({ "title", "state", "assigned_to" }) do
+    local layout = EDIT_FIELD_LAYOUTS[key]
+    vim.api.nvim_buf_set_extmark(bufnr, edit_label_ns, layout.line, 0, {
+      virt_text = { { layout.label, label_hl(key) } },
+      virt_text_pos = "overlay",
+    })
+  end
+  vim.api.nvim_buf_set_extmark(bufnr, edit_label_ns, 4, 0, {
+    virt_text = { { "Description:", label_hl("description") } },
+    virt_text_pos = "inline",
+  })
+end
+
+local function refresh_edit_tag_badges(bufnr, changed_keys)
+  if not vim.api.nvim_buf_is_valid(bufnr) then
+    return
+  end
+  changed_keys = changed_keys or {}
   vim.api.nvim_buf_clear_namespace(bufnr, edit_tag_ns, 0, -1)
   local tag_line = vim.api.nvim_buf_get_lines(bufnr, EDIT_TAG_LINE, EDIT_TAG_LINE + 1, false)[1]
   if tag_line == nil then
     return
   end
-  badges.decorate_tag_field(bufnr, edit_tag_ns, EDIT_TAG_LINE, tag_line, 0, {
-    { "Tags: ", "TaskmeisterBlue" },
+  local layout = EDIT_FIELD_LAYOUTS.tags
+  local prefix_hl = changed_keys.tags and "TaskmeisterChangedField" or "TaskmeisterBlue"
+  vim.api.nvim_buf_set_extmark(bufnr, edit_tag_ns, EDIT_TAG_LINE, 0, {
+    virt_text = { { layout.label, prefix_hl } },
+    virt_text_pos = "overlay",
   })
+  badges.decorate_tag_field(bufnr, edit_tag_ns, EDIT_TAG_LINE, tag_line, layout.value_col)
 end
 
 local function render_edit_status(bufnr, item, values)
   local save_status_text, save_status_hl = current_save_status(bufnr, item.rev)
   local fields = item.fields or {}
   local tag_value = values and values.tags or fields["System.Tags"] or ""
+  local changed_fields = changed_fields_from_editor(vim.b[bufnr].taskmeister_edit_meta, values)
   local virt_lines = {
     { { string.format("Work Item #%s • rev %s", tostring(item.id), tostring(item.rev)), "TaskmeisterBlue" } },
   }
@@ -147,6 +257,16 @@ local function render_edit_status(bufnr, item, values)
     local line = { { "Labels: ", "TaskmeisterBlue" } }
     vim.list_extend(line, tag_chunks)
     table.insert(virt_lines, line)
+  end
+  if #changed_fields > 0 then
+    local labels = {}
+    for _, field in ipairs(changed_fields) do
+      table.insert(labels, field.label)
+    end
+    table.insert(virt_lines, {
+      { "Changed: ", "TaskmeisterChangedField" },
+      { table.concat(labels, ", "), "TaskmeisterChangedField" },
+    })
   end
   table.insert(virt_lines, { { save_status_text, save_status_hl } })
   table.insert(virt_lines, { { "Save: :w / <C-s>   Add comment: <leader>wc   React: <leader>wr   Close: q", "Comment" } })
@@ -168,7 +288,9 @@ local function refresh_edit_save_status(bufnr)
     return
   end
   local values = extract_editor_values(bufnr)
-  refresh_edit_tag_badges(bufnr)
+  local _, changed_keys = changed_fields_from_editor(meta, values)
+  refresh_edit_field_labels(bufnr, changed_keys)
+  refresh_edit_tag_badges(bufnr, changed_keys)
   if vim.b[bufnr].taskmeister_save_in_progress then
     vim.b[bufnr].taskmeister_save_status = "saving"
     render_edit_status(bufnr, meta.original, values)
@@ -242,11 +364,18 @@ local function render_edit_dialog(bufnr, item, comments)
   end
   local tags = fields["System.Tags"] or ""
   local description_lines = split_text(fields["System.Description"] or "")
+  local values = {
+    title = title,
+    state = state,
+    assigned_to = assigned,
+    tags = tags,
+    description = fields["System.Description"] or "",
+  }
   local lines = {
-    title,
-    state,
-    assigned,
-    tags,
+    labeled_edit_line("title", title),
+    labeled_edit_line("state", state),
+    labeled_edit_line("assigned_to", assigned),
+    labeled_edit_line("tags", tags),
     "",
   }
   vim.list_extend(lines, description_lines)
@@ -274,24 +403,10 @@ local function render_edit_dialog(bufnr, item, comments)
   vim.api.nvim_buf_set_option(bufnr, "modifiable", true)
   vim.api.nvim_buf_set_lines(bufnr, 0, -1, false, lines)
   vim.api.nvim_buf_clear_namespace(bufnr, edit_ns, 0, -1)
-  render_edit_status(bufnr, item)
-  vim.api.nvim_buf_set_extmark(bufnr, edit_ns, 0, 0, {
-    virt_text = { { "Title: ", "TaskmeisterBlue" } },
-    virt_text_pos = "inline",
-  })
-  vim.api.nvim_buf_set_extmark(bufnr, edit_ns, 1, 0, {
-    virt_text = { { "State: ", "TaskmeisterBlue" } },
-    virt_text_pos = "inline",
-  })
-  vim.api.nvim_buf_set_extmark(bufnr, edit_ns, 2, 0, {
-    virt_text = { { "Assigned To: ", "TaskmeisterBlue" } },
-    virt_text_pos = "inline",
-  })
-  vim.api.nvim_buf_set_extmark(bufnr, edit_ns, 4, 0, {
-    virt_text = { { "Description:", "TaskmeisterBlue" } },
-    virt_text_pos = "inline",
-  })
-  refresh_edit_tag_badges(bufnr)
+  local _, changed_keys = changed_fields_from_editor(vim.b[bufnr].taskmeister_edit_meta, values)
+  render_edit_status(bufnr, item, values)
+  refresh_edit_field_labels(bufnr, changed_keys)
+  refresh_edit_tag_badges(bufnr, changed_keys)
   vim.api.nvim_buf_add_highlight(bufnr, edit_ns, "TaskmeisterBlue", comments_start - 1, 0, -1)
 
   local line_count = vim.api.nvim_buf_line_count(bufnr)
@@ -314,6 +429,93 @@ local function render_edit_dialog(bufnr, item, comments)
 
   vim.api.nvim_buf_set_option(bufnr, "modified", false)
   vim.b[bufnr].taskmeister_rendering_edit_dialog = false
+end
+
+local function edit_dialog_has_changes(bufnr)
+  if not vim.api.nvim_buf_is_valid(bufnr) then
+    return false
+  end
+  local meta = vim.b[bufnr].taskmeister_edit_meta
+  if not meta or not meta.original then
+    return vim.bo[bufnr].modified
+  end
+  return not vim.tbl_isempty(build_patches_from_editor(meta, extract_editor_values(bufnr)))
+end
+
+local function field_at_cursor()
+  local cursor = vim.api.nvim_win_get_cursor(0)
+  for _, key in ipairs(EDIT_FIELD_ORDER) do
+    local layout = EDIT_FIELD_LAYOUTS[key]
+    if cursor[1] == layout.line + 1 then
+      return key, layout, cursor
+    end
+  end
+  return nil, nil, cursor
+end
+
+local function clamp_edit_field_cursor(bufnr)
+  if not vim.api.nvim_buf_is_valid(bufnr) or vim.api.nvim_get_current_buf() ~= bufnr then
+    return
+  end
+
+  local key, layout, cursor = field_at_cursor()
+  if not key then
+    return
+  end
+
+  normalize_labeled_line(bufnr, key)
+
+  if cursor[2] < layout.value_col then
+    vim.api.nvim_win_set_cursor(0, { cursor[1], layout.value_col })
+  end
+end
+
+local function start_insert_after_field_label(bufnr, force_field_start)
+  if not vim.api.nvim_buf_is_valid(bufnr) or vim.api.nvim_get_current_buf() ~= bufnr then
+    return false
+  end
+
+  local key, layout, cursor = field_at_cursor()
+  if not key then
+    return false
+  end
+
+  normalize_labeled_line(bufnr, key)
+  if force_field_start or cursor[2] < layout.value_col then
+    vim.api.nvim_win_set_cursor(0, { cursor[1], layout.value_col })
+    vim.cmd("startinsert")
+    return true
+  end
+
+  return false
+end
+
+local function feed_normal_key(key)
+  vim.api.nvim_feedkeys(vim.api.nvim_replace_termcodes(key, true, false, true), "n", false)
+end
+
+local function close_edit_dialog(bufnr, win)
+  if not vim.api.nvim_win_is_valid(win) then
+    return
+  end
+
+  if vim.b[bufnr].taskmeister_save_in_progress then
+    vim.notify("Save already in progress", vim.log.levels.INFO)
+    return
+  end
+
+  if not edit_dialog_has_changes(bufnr) then
+    vim.api.nvim_win_close(win, true)
+    return
+  end
+
+  vim.ui.select({ "Cancel", "Discard changes" }, {
+    prompt = "Discard unsaved Taskmeister changes?",
+  }, function(choice)
+    if choice == "Discard changes" and vim.api.nvim_win_is_valid(win) then
+      vim.api.nvim_win_close(win, true)
+    end
+  end)
 end
 
 function M.open_work_item(id)
@@ -729,17 +931,26 @@ function M.open_work_item_edit_dialog(id)
     title = " Edit Work Item #" .. id .. " ",
     title_pos = "center",
   })
+  pcall(vim.api.nvim_win_set_option, win, "virtualedit", "onemore")
 
   vim.keymap.set("n", "q", function()
-    if vim.api.nvim_win_is_valid(win) then
-      vim.api.nvim_win_close(win, true)
-    end
+    close_edit_dialog(bufnr, win)
   end, { buffer = bufnr, silent = true, desc = "Close edit dialog" })
-  vim.keymap.set("n", "<Esc>", function()
-    if vim.api.nvim_win_is_valid(win) then
-      vim.api.nvim_win_close(win, true)
+  vim.keymap.set("n", "i", function()
+    if not start_insert_after_field_label(bufnr, false) then
+      feed_normal_key("i")
     end
-  end, { buffer = bufnr, silent = true, desc = "Close edit dialog" })
+  end, { buffer = bufnr, silent = true, desc = "Insert after field label" })
+  vim.keymap.set("n", "a", function()
+    if not start_insert_after_field_label(bufnr, false) then
+      feed_normal_key("a")
+    end
+  end, { buffer = bufnr, silent = true, desc = "Append after field label" })
+  vim.keymap.set("n", "I", function()
+    if not start_insert_after_field_label(bufnr, true) then
+      feed_normal_key("I")
+    end
+  end, { buffer = bufnr, silent = true, desc = "Insert at field value start" })
   vim.keymap.set("n", "<C-s>", function()
     M.save_work_item_dialog(bufnr)
   end, { buffer = bufnr, silent = true, desc = "Save work item" })
@@ -772,6 +983,13 @@ function M.open_work_item_edit_dialog(id)
       refresh_edit_save_status(bufnr)
     end,
     desc = "Refresh Taskmeister edit dialog save status",
+  })
+  vim.api.nvim_create_autocmd({ "InsertEnter", "CursorMovedI" }, {
+    buffer = bufnr,
+    callback = function()
+      clamp_edit_field_cursor(bufnr)
+    end,
+    desc = "Keep Taskmeister edit field cursor after label",
   })
 
   api.get_work_items_batch_async({ id }, function(items, err)

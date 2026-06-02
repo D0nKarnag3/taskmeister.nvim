@@ -538,6 +538,7 @@ function M.register()
   vim.api.nvim_set_hl(0, "TaskmeisterComment", { fg = "#D7BA7D" }) -- New highlight for comments
   vim.api.nvim_set_hl(0, "TaskmeisterMuted", { fg = "#8B949E" })
   vim.api.nvim_set_hl(0, "TaskmeisterReactionCount", { fg = "#C8D1E0" })
+  vim.api.nvim_set_hl(0, "TaskmeisterChangedField", { fg = "#F2CC60", bold = true })
 
   local function set_badge(cap_hl, body_hl, bg, fg)
     vim.api.nvim_set_hl(0, cap_hl, { fg = bg })
