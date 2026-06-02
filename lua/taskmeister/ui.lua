@@ -12,25 +12,48 @@ local edit_tag_ns = vim.api.nvim_create_namespace("taskmeister_edit_tags")
 local status_ns = vim.api.nvim_create_namespace("taskmeister_edit_status")
 local COMMENTS_MARKER = "──────────────── Comments ────────────────"
 local REACTION_TYPES = badges.reaction_types
-local EDIT_FIELD_LAYOUTS = {
-  title = { line = 0, label = "Title: " },
-  state = { line = 1, label = "State: " },
-  assigned_to = { line = 2, label = "Assigned To: " },
-  tags = { line = 3, label = "Tags: " },
+local EDIT_DIALOG_FIELDS = {
+  "System.Id",
+  "System.Title",
+  "System.WorkItemType",
+  "System.State",
+  "System.Description",
+  "System.AssignedTo",
+  "System.Tags",
+  "Microsoft.VSTS.Scheduling.OriginalEstimate",
+  "Microsoft.VSTS.Scheduling.RemainingWork",
+  "Microsoft.VSTS.Scheduling.CompletedWork",
 }
-local EDIT_FIELD_ORDER = { "title", "state", "assigned_to", "tags" }
-for _, layout in pairs(EDIT_FIELD_LAYOUTS) do
-  layout.value_col = #layout.label
-  layout.padding = string.rep(" ", layout.value_col)
-end
-local EDIT_TAG_LINE = EDIT_FIELD_LAYOUTS.tags.line
-local EDIT_FIELDS = {
-  { key = "title", label = "Title", path = "/fields/System.Title" },
-  { key = "state", label = "State", path = "/fields/System.State" },
-  { key = "assigned_to", label = "Assigned To", path = "/fields/System.AssignedTo" },
-  { key = "tags", label = "Tags", path = "/fields/System.Tags" },
-  { key = "description", label = "Description", path = "/fields/System.Description" },
+local EDIT_FIELD_DEFINITIONS = {
+  title = { key = "title", label = "Title", edit_label = "Title: ", path = "/fields/System.Title" },
+  state = { key = "state", label = "State", edit_label = "State: ", path = "/fields/System.State" },
+  assigned_to = { key = "assigned_to", label = "Assigned To", edit_label = "Assigned To: ", path = "/fields/System.AssignedTo" },
+  tags = { key = "tags", label = "Tags", edit_label = "Tags: ", path = "/fields/System.Tags" },
+  original_estimate = {
+    key = "original_estimate",
+    label = "Original estimate",
+    edit_label = "Original estimate: ",
+    path = "/fields/Microsoft.VSTS.Scheduling.OriginalEstimate",
+    numeric = true,
+  },
+  remaining = {
+    key = "remaining",
+    label = "Remaining",
+    edit_label = "Remaining: ",
+    path = "/fields/Microsoft.VSTS.Scheduling.RemainingWork",
+    numeric = true,
+  },
+  completed = {
+    key = "completed",
+    label = "Completed",
+    edit_label = "Completed: ",
+    path = "/fields/Microsoft.VSTS.Scheduling.CompletedWork",
+    numeric = true,
+  },
+  description = { key = "description", label = "Description", path = "/fields/System.Description" },
 }
+local EDIT_BASE_FIELD_ORDER = { "title", "state", "assigned_to", "tags" }
+local EDIT_TASK_FIELD_ORDER = { "original_estimate", "remaining", "completed" }
 
 M.buffers = buffers
 
@@ -51,6 +74,10 @@ local function split_text(value)
   return vim.split(value, "\n", { plain = true })
 end
 
+local function trim(value)
+  return tostring(value or ""):match("^%s*(.-)%s*$")
+end
+
 local function assigned_value(fields)
   local assigned = fields["System.AssignedTo"]
   if type(assigned) == "table" then
@@ -62,6 +89,19 @@ local function assigned_value(fields)
   return ""
 end
 
+local function field_string(fields, key)
+  local value = fields[key]
+  if value == nil then
+    return ""
+  end
+  return tostring(value)
+end
+
+local function is_task_item(item)
+  local fields = (item or {}).fields or {}
+  return fields["System.WorkItemType"] == "Task"
+end
+
 local function editor_values_from_item(item)
   local fields = (item or {}).fields or {}
   return {
@@ -69,8 +109,87 @@ local function editor_values_from_item(item)
     state = fields["System.State"] or "New",
     assigned_to = assigned_value(fields),
     tags = fields["System.Tags"] or "",
+    original_estimate = field_string(fields, "Microsoft.VSTS.Scheduling.OriginalEstimate"),
+    remaining = field_string(fields, "Microsoft.VSTS.Scheduling.RemainingWork"),
+    completed = field_string(fields, "Microsoft.VSTS.Scheduling.CompletedWork"),
     description = fields["System.Description"] or "",
   }
+end
+
+local function edit_field_order_for_item(item)
+  local order = {}
+  for _, key in ipairs(EDIT_BASE_FIELD_ORDER) do
+    table.insert(order, key)
+  end
+  if is_task_item(item) then
+    for _, key in ipairs(EDIT_TASK_FIELD_ORDER) do
+      table.insert(order, key)
+    end
+  end
+  return order
+end
+
+local function active_edit_fields(item)
+  local fields = {}
+  for _, key in ipairs(edit_field_order_for_item(item)) do
+    table.insert(fields, EDIT_FIELD_DEFINITIONS[key])
+  end
+  table.insert(fields, EDIT_FIELD_DEFINITIONS.description)
+  return fields
+end
+
+local function build_edit_layout(item)
+  local order = edit_field_order_for_item(item)
+  local fields = {}
+  for index, key in ipairs(order) do
+    local definition = EDIT_FIELD_DEFINITIONS[key]
+    local label = definition.edit_label
+    fields[key] = {
+      key = key,
+      line = index - 1,
+      label = label,
+      value_col = #label,
+      padding = string.rep(" ", #label),
+    }
+  end
+  return {
+    fields = fields,
+    order = order,
+    description_label_line = #order,
+    description_start_line = #order + 1,
+  }
+end
+
+local function edit_layout_for_bufnr(bufnr)
+  local meta = vim.b[bufnr].taskmeister_edit_meta
+  return build_edit_layout(meta and meta.original or nil)
+end
+
+local function parse_decimal_hours(value, field)
+  local raw = trim(value)
+  if raw == "" then
+    return nil, nil
+  end
+  if not (raw:match("^%d+$") or raw:match("^%d+%.%d+$")) then
+    return nil, field.label .. " must be a non-negative decimal hour value"
+  end
+  local number = tonumber(raw)
+  if not number or number < 0 then
+    return nil, field.label .. " must be a non-negative decimal hour value"
+  end
+  return number, nil
+end
+
+local function field_values_equal(field, left, right)
+  if field.numeric then
+    local left_number, left_err = parse_decimal_hours(left, field)
+    local right_number, right_err = parse_decimal_hours(right, field)
+    if left_err or right_err then
+      return trim(left) == trim(right)
+    end
+    return left_number == right_number
+  end
+  return (left or "") == (right or "")
 end
 
 local function extract_labeled_value(value, layout)
@@ -91,8 +210,7 @@ local function extract_labeled_value(value, layout)
   return ""
 end
 
-local function labeled_edit_line(key, value)
-  local layout = EDIT_FIELD_LAYOUTS[key]
+local function labeled_edit_line(layout, value)
   return layout.padding .. tostring(value or "")
 end
 
@@ -100,7 +218,10 @@ local function normalize_labeled_line(bufnr, key)
   if not vim.api.nvim_buf_is_valid(bufnr) then
     return nil
   end
-  local layout = EDIT_FIELD_LAYOUTS[key]
+  local layout = edit_layout_for_bufnr(bufnr).fields[key]
+  if not layout then
+    return nil
+  end
   local line = vim.api.nvim_buf_get_lines(bufnr, layout.line, layout.line + 1, false)[1]
   if line == nil then
     return nil
@@ -109,19 +230,21 @@ local function normalize_labeled_line(bufnr, key)
     return line
   end
 
-  local fixed = labeled_edit_line(key, extract_labeled_value(line, layout))
+  local fixed = labeled_edit_line(layout, extract_labeled_value(line, layout))
   vim.api.nvim_buf_set_lines(bufnr, layout.line, layout.line + 1, false, { fixed })
   return fixed
 end
 
 local function extract_editor_values(bufnr)
-  local title = extract_labeled_value(normalize_labeled_line(bufnr, "title"), EDIT_FIELD_LAYOUTS.title)
-  local state = extract_labeled_value(normalize_labeled_line(bufnr, "state"), EDIT_FIELD_LAYOUTS.state)
-  local assigned = extract_labeled_value(normalize_labeled_line(bufnr, "assigned_to"), EDIT_FIELD_LAYOUTS.assigned_to)
-  local tags = extract_labeled_value(normalize_labeled_line(bufnr, "tags"), EDIT_FIELD_LAYOUTS.tags)
+  local layout_info = edit_layout_for_bufnr(bufnr)
+  local values = {}
+  for _, key in ipairs(layout_info.order) do
+    local layout = layout_info.fields[key]
+    values[key] = extract_labeled_value(normalize_labeled_line(bufnr, key), layout)
+  end
   local lines = vim.api.nvim_buf_get_lines(bufnr, 0, -1, false)
   local description_lines = {}
-  for i = 6, #lines do
+  for i = layout_info.description_start_line + 1, #lines do
     if lines[i] == COMMENTS_MARKER then
       break
     end
@@ -130,13 +253,8 @@ local function extract_editor_values(bufnr)
   while #description_lines > 0 and description_lines[#description_lines] == "" do
     table.remove(description_lines, #description_lines)
   end
-  return {
-    title = title,
-    state = state,
-    assigned_to = assigned,
-    tags = tags,
-    description = table.concat(description_lines, "\n"),
-  }
+  values.description = table.concat(description_lines, "\n")
+  return values
 end
 
 local function changed_fields_from_editor(meta, values)
@@ -147,8 +265,8 @@ local function changed_fields_from_editor(meta, values)
   end
 
   local original = editor_values_from_item(meta.original)
-  for _, field in ipairs(EDIT_FIELDS) do
-    if values[field.key] ~= original[field.key] then
+  for _, field in ipairs(active_edit_fields(meta.original)) do
+    if not field_values_equal(field, values[field.key], original[field.key]) then
       table.insert(changed_fields, field)
       changed_keys[field.key] = true
     end
@@ -174,6 +292,9 @@ local function current_save_status(bufnr, rev)
   if status == "saved_dirty" then
     return string.format("Saved (rev %s); unsaved edits remain", tostring(rev)), "WarningMsg"
   end
+  if status == "invalid" then
+    return vim.b[bufnr].taskmeister_save_error or "Invalid field value", "ErrorMsg"
+  end
   if status == "error" then
     return "Save failed", "ErrorMsg"
   end
@@ -182,19 +303,36 @@ end
 
 local function build_patches_from_editor(meta, values)
   local patches = {}
+  local original = editor_values_from_item(meta.original)
   local changed_fields = changed_fields_from_editor(meta, values)
   for _, field in ipairs(changed_fields) do
-    table.insert(patches, { op = "replace", path = field.path, value = values[field.key] })
+    if field.numeric then
+      local number, validation_err = parse_decimal_hours(values[field.key], field)
+      if validation_err then
+        return nil, validation_err
+      end
+      if number == nil then
+        table.insert(patches, { op = "remove", path = field.path })
+      else
+        local op = trim(original[field.key]) == "" and "add" or "replace"
+        table.insert(patches, { op = op, path = field.path, value = number })
+      end
+    else
+      table.insert(patches, { op = "replace", path = field.path, value = values[field.key] })
+    end
   end
-  return patches
+  return patches, nil
 end
 
 local function editor_values_equal(left, right)
-  return left.title == right.title
-    and left.state == right.state
-    and left.assigned_to == right.assigned_to
-    and left.tags == right.tags
-    and left.description == right.description
+  left = left or {}
+  right = right or {}
+  for _, field in pairs(EDIT_FIELD_DEFINITIONS) do
+    if (left[field.key] or "") ~= (right[field.key] or "") then
+      return false
+    end
+  end
+  return true
 end
 
 local function get_cached_comments(bufnr)
@@ -206,20 +344,23 @@ local function refresh_edit_field_labels(bufnr, changed_keys)
     return
   end
   changed_keys = changed_keys or {}
+  local layout_info = edit_layout_for_bufnr(bufnr)
   vim.api.nvim_buf_clear_namespace(bufnr, edit_label_ns, 0, -1)
 
   local function label_hl(key)
     return changed_keys[key] and "TaskmeisterChangedField" or "TaskmeisterBlue"
   end
 
-  for _, key in ipairs({ "title", "state", "assigned_to" }) do
-    local layout = EDIT_FIELD_LAYOUTS[key]
-    vim.api.nvim_buf_set_extmark(bufnr, edit_label_ns, layout.line, 0, {
-      virt_text = { { layout.label, label_hl(key) } },
-      virt_text_pos = "overlay",
-    })
+  for _, key in ipairs(layout_info.order) do
+    if key ~= "tags" then
+      local layout = layout_info.fields[key]
+      vim.api.nvim_buf_set_extmark(bufnr, edit_label_ns, layout.line, 0, {
+        virt_text = { { layout.label, label_hl(key) } },
+        virt_text_pos = "overlay",
+      })
+    end
   end
-  vim.api.nvim_buf_set_extmark(bufnr, edit_label_ns, 4, 0, {
+  vim.api.nvim_buf_set_extmark(bufnr, edit_label_ns, layout_info.description_label_line, 0, {
     virt_text = { { "Description:", label_hl("description") } },
     virt_text_pos = "inline",
   })
@@ -230,18 +371,21 @@ local function refresh_edit_tag_badges(bufnr, changed_keys)
     return
   end
   changed_keys = changed_keys or {}
+  local layout = edit_layout_for_bufnr(bufnr).fields.tags
+  if not layout then
+    return
+  end
   vim.api.nvim_buf_clear_namespace(bufnr, edit_tag_ns, 0, -1)
-  local tag_line = vim.api.nvim_buf_get_lines(bufnr, EDIT_TAG_LINE, EDIT_TAG_LINE + 1, false)[1]
+  local tag_line = vim.api.nvim_buf_get_lines(bufnr, layout.line, layout.line + 1, false)[1]
   if tag_line == nil then
     return
   end
-  local layout = EDIT_FIELD_LAYOUTS.tags
   local prefix_hl = changed_keys.tags and "TaskmeisterChangedField" or "TaskmeisterBlue"
-  vim.api.nvim_buf_set_extmark(bufnr, edit_tag_ns, EDIT_TAG_LINE, 0, {
+  vim.api.nvim_buf_set_extmark(bufnr, edit_tag_ns, layout.line, 0, {
     virt_text = { { layout.label, prefix_hl } },
     virt_text_pos = "overlay",
   })
-  badges.decorate_tag_field(bufnr, edit_tag_ns, EDIT_TAG_LINE, tag_line, layout.value_col)
+  badges.decorate_tag_field(bufnr, edit_tag_ns, layout.line, tag_line, layout.value_col)
 end
 
 local function render_edit_status(bufnr, item, values)
@@ -297,7 +441,14 @@ local function refresh_edit_save_status(bufnr)
     return
   end
 
-  local patches = build_patches_from_editor(meta, values)
+  local patches, validation_err = build_patches_from_editor(meta, values)
+  if validation_err then
+    vim.b[bufnr].taskmeister_save_status = "invalid"
+    vim.b[bufnr].taskmeister_save_error = validation_err
+    render_edit_status(bufnr, meta.original, values)
+    return
+  end
+  vim.b[bufnr].taskmeister_save_error = nil
   if vim.tbl_isempty(patches) then
     if vim.b[bufnr].taskmeister_save_status ~= "saved" then
       vim.b[bufnr].taskmeister_save_status = "clean"
@@ -352,32 +503,14 @@ local function render_edit_dialog(bufnr, item, comments)
   comments = comments or {}
   vim.b[bufnr].taskmeister_edit_comments = comments
   vim.b[bufnr].taskmeister_rendering_edit_dialog = true
-  local fields = item.fields or {}
-  local title = fields["System.Title"] or ""
-  local state = fields["System.State"] or "New"
-  local assigned_to = fields["System.AssignedTo"]
-  local assigned = ""
-  if type(assigned_to) == "table" then
-    assigned = assigned_to.uniqueName or assigned_to.displayName or ""
-  elseif type(assigned_to) == "string" then
-    assigned = assigned_to
+  local values = editor_values_from_item(item)
+  local layout_info = build_edit_layout(item)
+  local description_lines = split_text(values.description)
+  local lines = {}
+  for _, key in ipairs(layout_info.order) do
+    table.insert(lines, labeled_edit_line(layout_info.fields[key], values[key]))
   end
-  local tags = fields["System.Tags"] or ""
-  local description_lines = split_text(fields["System.Description"] or "")
-  local values = {
-    title = title,
-    state = state,
-    assigned_to = assigned,
-    tags = tags,
-    description = fields["System.Description"] or "",
-  }
-  local lines = {
-    labeled_edit_line("title", title),
-    labeled_edit_line("state", state),
-    labeled_edit_line("assigned_to", assigned),
-    labeled_edit_line("tags", tags),
-    "",
-  }
+  table.insert(lines, "")
   vim.list_extend(lines, description_lines)
   table.insert(lines, "")
   table.insert(lines, COMMENTS_MARKER)
@@ -439,13 +572,15 @@ local function edit_dialog_has_changes(bufnr)
   if not meta or not meta.original then
     return vim.bo[bufnr].modified
   end
-  return not vim.tbl_isempty(build_patches_from_editor(meta, extract_editor_values(bufnr)))
+  local patches, validation_err = build_patches_from_editor(meta, extract_editor_values(bufnr))
+  return validation_err ~= nil or not vim.tbl_isempty(patches or {})
 end
 
-local function field_at_cursor()
+local function field_at_cursor(bufnr)
   local cursor = vim.api.nvim_win_get_cursor(0)
-  for _, key in ipairs(EDIT_FIELD_ORDER) do
-    local layout = EDIT_FIELD_LAYOUTS[key]
+  local layout_info = edit_layout_for_bufnr(bufnr)
+  for _, key in ipairs(layout_info.order) do
+    local layout = layout_info.fields[key]
     if cursor[1] == layout.line + 1 then
       return key, layout, cursor
     end
@@ -458,7 +593,7 @@ local function clamp_edit_field_cursor(bufnr)
     return
   end
 
-  local key, layout, cursor = field_at_cursor()
+  local key, layout, cursor = field_at_cursor(bufnr)
   if not key then
     return
   end
@@ -475,7 +610,7 @@ local function start_insert_after_field_label(bufnr, force_field_start)
     return false
   end
 
-  local key, layout, cursor = field_at_cursor()
+  local key, layout, cursor = field_at_cursor(bufnr)
   if not key then
     return false
   end
@@ -572,11 +707,19 @@ function M.save_work_item_dialog_sync(bufnr)
   end
 
   local values = extract_editor_values(bufnr)
-  local patches = build_patches_from_editor(meta, values)
+  local patches, validation_err = build_patches_from_editor(meta, values)
+  if validation_err then
+    vim.b[bufnr].taskmeister_save_status = "invalid"
+    vim.b[bufnr].taskmeister_save_error = validation_err
+    render_edit_status(bufnr, meta.original, values)
+    vim.notify(validation_err, vim.log.levels.ERROR)
+    return false
+  end
 
   if vim.tbl_isempty(patches) then
     vim.api.nvim_buf_set_option(bufnr, "modified", false)
     vim.b[bufnr].taskmeister_save_status = "saved"
+    vim.b[bufnr].taskmeister_save_error = nil
     render_edit_dialog(bufnr, meta.original, get_cached_comments(bufnr))
     vim.notify("No changes to save for work item #" .. meta.id, vim.log.levels.INFO)
     return true
@@ -584,6 +727,7 @@ function M.save_work_item_dialog_sync(bufnr)
 
   vim.b[bufnr].taskmeister_save_in_progress = true
   vim.b[bufnr].taskmeister_save_status = "saving"
+  vim.b[bufnr].taskmeister_save_error = nil
   render_edit_status(bufnr, meta.original, values)
   vim.notify("Saving work item #" .. meta.id .. "...", vim.log.levels.INFO)
 
@@ -627,11 +771,22 @@ function M.save_work_item_dialog_async(bufnr, callback)
   end
 
   local values = extract_editor_values(bufnr)
-  local patches = build_patches_from_editor(meta, values)
+  local patches, validation_err = build_patches_from_editor(meta, values)
+  if validation_err then
+    vim.b[bufnr].taskmeister_save_status = "invalid"
+    vim.b[bufnr].taskmeister_save_error = validation_err
+    render_edit_status(bufnr, meta.original, values)
+    vim.notify(validation_err, vim.log.levels.ERROR)
+    if callback then
+      callback(false)
+    end
+    return
+  end
 
   if vim.tbl_isempty(patches) then
     vim.api.nvim_buf_set_option(bufnr, "modified", false)
     vim.b[bufnr].taskmeister_save_status = "saved"
+    vim.b[bufnr].taskmeister_save_error = nil
     render_edit_dialog(bufnr, meta.original, get_cached_comments(bufnr))
     vim.notify("No changes to save for work item #" .. meta.id, vim.log.levels.INFO)
     if callback then
@@ -642,6 +797,7 @@ function M.save_work_item_dialog_async(bufnr, callback)
 
   vim.b[bufnr].taskmeister_save_in_progress = true
   vim.b[bufnr].taskmeister_save_status = "saving"
+  vim.b[bufnr].taskmeister_save_error = nil
   render_edit_status(bufnr, meta.original, values)
   vim.notify("Saving work item #" .. meta.id .. "...", vim.log.levels.INFO)
 
@@ -761,7 +917,7 @@ function M.add_comment_to_dialog(bufnr)
               end)
             end)
           end)
-        end)
+        end, EDIT_DIALOG_FIELDS)
       end)
     end)
   end
@@ -861,7 +1017,7 @@ function M.react_to_comment_in_dialog(bufnr)
                       end)
                     end)
                   end)
-                end)
+                end, EDIT_DIALOG_FIELDS)
               end)
             end
 
@@ -1024,7 +1180,7 @@ function M.open_work_item_edit_dialog(id)
         end)
       end)
     end)
-  end)
+  end, EDIT_DIALOG_FIELDS)
 
 end
 
